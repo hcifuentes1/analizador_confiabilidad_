@@ -59,71 +59,18 @@ class CDVProcessorL2(BaseProcessor):
                     progress = (i / total_files) * 15
                     progress_callback(5 + progress, f"Procesando archivo {i+1} de {total_files}: {os.path.basename(file_path)}")
                 
-                # Leer archivo según su extensión
-                if file_path.lower().endswith('.csv'):
-                    # Probar diferentes codificaciones y separadores comunes para CSV
-                    try:
-                        # Primero intentar con separador punto y coma (común en configuraciones europeas)
-                        df = pd.read_csv(file_path, sep=';', encoding='utf-8')
-                    except:
-                        try:
-                            # Luego intentar con separador coma (estándar)
-                            df = pd.read_csv(file_path, sep=',', encoding='utf-8')
-                        except:
-                            try:
-                                # Intentar con codificación Latin-1
-                                df = pd.read_csv(file_path, sep=';', encoding='latin1')
-                            except:
-                                # Último intento con coma y Latin-1
-                                df = pd.read_csv(file_path, sep=',', encoding='latin1')
-                else:
-                    # Para archivos Excel
-                    df = pd.read_excel(file_path)
+                # Determinar si es un archivo en el nuevo formato (basado en el nombre o estructura)
+                is_new_format = self._is_new_format_file(file_path)
                 
-                # Verificar si es un archivo con formato esperado
-                if 'FECHA' in df.columns and 'HORA' in df.columns:
-                    # Filtrar columnas que empiezan con 'CDV'
-                    cdv_cols = [col for col in df.columns if col.startswith('CDV')]
-                    if not cdv_cols:
-                        continue
-                    
-                    # Tomar sólo las columnas necesarias
-                    cols_to_keep = ['ciclo', 'FECHA', 'HORA'] + cdv_cols
-                    cols_to_keep = [col for col in cols_to_keep if col in df.columns]
-                    df = df[cols_to_keep]
-                    
-                    # Crear una versión "derretida" (melted) del dataframe para análisis
-                    id_vars = ['ciclo', 'FECHA', 'HORA']
-                    id_vars = [col for col in id_vars if col in df.columns]
-                    
-                    df_melted = pd.melt(
-                        df, 
-                        id_vars=id_vars, 
-                        value_vars=cdv_cols,
-                        var_name='Equipo',
-                        value_name='Estado'
-                    )
-                    
-                    # Agregar columna de estación basada en el nombre del CDV
-                    df_melted['Estacion'] = df_melted['Equipo'].str.extract(r'CDV\s+(\d+)')
-                    df_melted['Subsistema'] = 'CDV'
-                    
-                    # Crear columna de fecha y hora combinada
-                    df_melted['Fecha Hora'] = pd.to_datetime(
-                        df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
-                        errors='coerce'
-                    )
-                    
-                    # Modificar Estado: considerar 1 como "Ocupacion" y 0 como "Liberacion"
-                    df_melted['Estado'] = df_melted['Estado'].apply(
-                        lambda x: 'Ocupacion' if x == 0 else 'Liberacion' if x == 1 else 'Desconocido'
-                    )
-                    
-                    # Seleccionar columnas finales
-                    df_melted = df_melted[['Fecha Hora', 'Equipo', 'Estacion', 'Subsistema', 'Estado']]
-                    
-                    # Agregar al listado
-                    df_list.append(df_melted)
+                if is_new_format:
+                    df = self._process_new_format_file(file_path, progress_callback)
+                    if df is not None and not df.empty:
+                        df_list.append(df)
+                else:
+                    # Leer archivo según su extensión (formato anterior)
+                    df = self._process_old_format_file(file_path, progress_callback)
+                    if df is not None and not df.empty:
+                        df_list.append(df)
                 
             except Exception as e:
                 if progress_callback:
@@ -135,6 +82,265 @@ class CDVProcessorL2(BaseProcessor):
             return True
         else:
             return False
+    
+    def _is_new_format_file(self, file_path):
+        """Determinar si un archivo está en el nuevo formato basándose en su estructura"""
+        try:
+            # Verificar si es un archivo CSV
+            if not file_path.lower().endswith('.csv'):
+                return False
+                
+            # Leer las primeras líneas para verificar la estructura
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                first_line = f.readline().strip()
+                
+            # Verificar si contiene la estructura específica del nuevo formato
+            # Por ejemplo, si contiene "ciclo,tiempo,milits" en la primera línea
+            if "ciclo,tiempo,milits" in first_line:
+                return True
+                
+            # Intentar leer el archivo como CSV y verificar los nombres de columnas
+            try:
+                header_df = pd.read_csv(file_path, nrows=1)
+                column_names = header_df.columns.tolist()
+                
+                # Verificar si tiene las columnas específicas del nuevo formato
+                if (any("SigV" in col for col in column_names) and 
+                    any("SigA" in col for col in column_names) and
+                    any("CDV" in col for col in column_names)):
+                    return True
+            except:
+                pass
+                
+            return False
+            
+        except Exception:
+            # Si hay algún error al intentar leer el archivo, asumimos que no es el nuevo formato
+            return False
+    
+    def _process_new_format_file(self, file_path, progress_callback=None):
+        """Procesar archivo en el nuevo formato"""
+        try:
+            if progress_callback:
+                progress_callback(None, f"Detectado archivo en nuevo formato: {os.path.basename(file_path)}")
+            
+            # Intentar determinar el separador correcto
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                first_line = f.readline().strip()
+                
+            # Determinar el separador basándose en la primera línea
+            if ',' in first_line:
+                separator = ','
+            elif ';' in first_line:
+                separator = ';'
+            else:
+                # Si no podemos determinar el separador, probamos con coma por defecto
+                separator = ','
+            
+            # Leer el archivo CSV
+            # Reemplazamos error_bad_lines por on_bad_lines para compatibilidad con pandas recientes
+            try:
+                # Para versiones recientes de pandas (1.3.0+)
+                df = pd.read_csv(file_path, sep=separator, encoding='utf-8', on_bad_lines='warn')
+            except TypeError:
+                # Para versiones anteriores de pandas
+                df = pd.read_csv(file_path, sep=separator, encoding='utf-8', error_bad_lines=False, warn_bad_lines=True)
+            
+            # Manejar caso donde el archivo podría tener una sola columna con todos los datos
+            if len(df.columns) == 1:
+                # Intentar dividir la única columna usando diferentes separadores
+                for possible_sep in [',', ';', '\t']:
+                    try:
+                        # Intentamos ambas formas para manejar diferentes versiones de pandas
+                        try:
+                            df = pd.read_csv(file_path, sep=possible_sep, encoding='utf-8', on_bad_lines='warn')
+                        except TypeError:
+                            df = pd.read_csv(file_path, sep=possible_sep, encoding='utf-8', error_bad_lines=False)
+                        
+                        if len(df.columns) > 1:
+                            break
+                    except:
+                        continue
+            
+            # Verificar si el DataFrame contiene las columnas esperadas
+            if 'ciclo' in df.columns and 'tiempo' in df.columns:
+                # Este es el nuevo formato con columnas "ciclo" y "tiempo"
+                
+                # Crear columna de fecha y hora combinada
+                if 'tiempo' in df.columns:
+                    # Asumimos que 'tiempo' está en formato adecuado (si no, necesitaríamos convertirlo)
+                    df['Fecha Hora'] = pd.to_datetime(df['tiempo'], errors='coerce')
+                else:
+                    # Si no existe 'tiempo', intentamos con otras columnas
+                    if 'ciclo' in df.columns and any('milits' in col for col in df.columns):
+                        time_col = next(col for col in df.columns if 'milits' in col)
+                        df['Fecha Hora'] = pd.to_datetime(df['ciclo'] + " " + df[time_col], errors='coerce')
+                
+                # Procesar columnas de CDV
+                cdv_columns = [col for col in df.columns if 'CDV' in col or 'SigA' in col]
+                if not cdv_columns:
+                    # Si no hay columnas explícitamente marcadas como CDV, buscar columnas con patrones de valores binarios
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                    cdv_columns = [col for col in numeric_cols if set(df[col].dropna().unique()).issubset({0, 1})]
+                
+                # Preparar DataFrame para formato "derretido" (melted)
+                data_rows = []
+                
+                for _, row in df.iterrows():
+                    fecha_hora = row['Fecha Hora']
+                    
+                    # Si la fecha es inválida, continuamos con la siguiente fila
+                    if pd.isna(fecha_hora):
+                        continue
+                        
+                    for cdv_col in cdv_columns:
+                        # Solo procesamos si el valor no es nulo
+                        if not pd.isna(row[cdv_col]):
+                            # Determinar estado
+                            estado_valor = row[cdv_col]
+                            estado = 'Liberacion' if estado_valor == 1 else 'Ocupacion' if estado_valor == 0 else 'Desconocido'
+                            
+                            # Extraer información de estación del nombre de la columna
+                            estacion = self._extract_station_from_column_name(cdv_col)
+                            
+                            # Agregar fila al conjunto de datos
+                            data_rows.append({
+                                'Fecha Hora': fecha_hora,
+                                'Equipo': cdv_col,
+                                'Estacion': estacion,
+                                'Subsistema': 'CDV',
+                                'Estado': estado
+                            })
+                
+                if data_rows:
+                    return pd.DataFrame(data_rows)
+                else:
+                    return None
+            else:
+                # No es el formato esperado
+                return None
+                
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error al procesar archivo en nuevo formato {file_path}: {str(e)}")
+            return None
+    
+    def _extract_station_from_column_name(self, column_name):
+        """Extraer información de estación del nombre de columna"""
+        # Este método intenta extraer la estación del nombre de una columna
+        # Por ejemplo, de "CDV 12 AV" extraería "12"
+        
+        # Patrón para extraer números de la columna
+        import re
+        station_match = re.search(r'(?:CDV|SigA)\s*(\d+)', column_name)
+        if station_match:
+            return station_match.group(1)
+        
+        # Patrón alternativo
+        station_match = re.search(r'(\d+)\s*(?:AV|CV)', column_name)
+        if station_match:
+            return station_match.group(1)
+            
+        # Si no se puede extraer, devolvemos un valor genérico
+        return 'NA'
+    
+    def _process_old_format_file(self, file_path, progress_callback=None):
+        """Procesar archivo en el formato anterior"""
+        try:
+            # Leer archivo según su extensión
+            if file_path.lower().endswith('.csv'):
+                # Probar diferentes codificaciones y separadores comunes para CSV
+                try:
+                    # Primero intentar con separador punto y coma (común en configuraciones europeas)
+                    try:
+                        # Para versiones recientes de pandas (1.3.0+)
+                        df = pd.read_csv(file_path, sep=';', encoding='utf-8', on_bad_lines='warn')
+                    except TypeError:
+                        # Para versiones anteriores de pandas
+                        df = pd.read_csv(file_path, sep=';', encoding='utf-8', error_bad_lines=False)
+                except:
+                    try:
+                        # Luego intentar con separador coma (estándar)
+                        try:
+                            df = pd.read_csv(file_path, sep=',', encoding='utf-8', on_bad_lines='warn')
+                        except TypeError:
+                            df = pd.read_csv(file_path, sep=',', encoding='utf-8', error_bad_lines=False)
+                    except:
+                        try:
+                            # Intentar con codificación Latin-1
+                            try:
+                                df = pd.read_csv(file_path, sep=';', encoding='latin1', on_bad_lines='warn')
+                            except TypeError:
+                                df = pd.read_csv(file_path, sep=';', encoding='latin1', error_bad_lines=False)
+                        except:
+                            # Último intento con coma y Latin-1
+                            try:
+                                df = pd.read_csv(file_path, sep=',', encoding='latin1', on_bad_lines='warn')
+                            except TypeError:
+                                df = pd.read_csv(file_path, sep=',', encoding='latin1', error_bad_lines=False)
+            else:
+                # Para archivos Excel
+                try:
+                    # Primero intentar con pandas directamente
+                    df = pd.read_excel(file_path)
+                except Exception as e1:
+                    # Si falla, intentar con engine='openpyxl'
+                    try:
+                        df = pd.read_excel(file_path, engine='openpyxl')
+                    except Exception as e2:
+                        # Último intento con engine='xlrd'
+                        df = pd.read_excel(file_path, engine='xlrd')
+            
+            # Verificar si es un archivo con formato esperado
+            if 'FECHA' in df.columns and 'HORA' in df.columns:
+                # Filtrar columnas que empiezan con 'CDV'
+                cdv_cols = [col for col in df.columns if col.startswith('CDV')]
+                if not cdv_cols:
+                    return None
+                
+                # Tomar sólo las columnas necesarias
+                cols_to_keep = ['ciclo', 'FECHA', 'HORA'] + cdv_cols
+                cols_to_keep = [col for col in cols_to_keep if col in df.columns]
+                df = df[cols_to_keep]
+                
+                # Crear una versión "derretida" (melted) del dataframe para análisis
+                id_vars = ['ciclo', 'FECHA', 'HORA']
+                id_vars = [col for col in id_vars if col in df.columns]
+                
+                df_melted = pd.melt(
+                    df, 
+                    id_vars=id_vars, 
+                    value_vars=cdv_cols,
+                    var_name='Equipo',
+                    value_name='Estado'
+                )
+                
+                # Agregar columna de estación basada en el nombre del CDV
+                df_melted['Estacion'] = df_melted['Equipo'].str.extract(r'CDV\s+(\d+)')
+                df_melted['Subsistema'] = 'CDV'
+                
+                # Crear columna de fecha y hora combinada
+                df_melted['Fecha Hora'] = pd.to_datetime(
+                    df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
+                    errors='coerce'
+                )
+                
+                # Modificar Estado: considerar 1 como "Ocupacion" y 0 como "Liberacion"
+                df_melted['Estado'] = df_melted['Estado'].apply(
+                    lambda x: 'Ocupacion' if x == 0 else 'Liberacion' if x == 1 else 'Desconocido'
+                )
+                
+                # Seleccionar columnas finales
+                df_melted = df_melted[['Fecha Hora', 'Equipo', 'Estacion', 'Subsistema', 'Estado']]
+                
+                return df_melted
+            
+            return None
+                
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error al procesar archivo en formato original {file_path}: {str(e)}")
+            return None
     
     def preprocess_data(self, progress_callback=None):
         """Realizar el preprocesamiento inicial de los datos"""
@@ -408,142 +614,3 @@ class CDVProcessorL2(BaseProcessor):
             progress_callback(90, "Preparación de reportes completada")
         
         return True
-    
-    def update_reports(self, progress_callback=None):
-        """Actualizar los reportes existentes con nuevos datos"""
-        try:
-            if progress_callback:
-                progress_callback(90, "Iniciando actualización de reportes...")
-                
-            # 1. Actualizar reporte de fallos de ocupación
-            fo_file_path = os.path.join(self.output_folder_path, 'df_L2_FO_Mensual.csv')
-            if os.path.exists(fo_file_path):
-                df_L2_FO_Mensual = pd.read_csv(fo_file_path)
-                
-                # Concatenar y eliminar duplicados
-                df_L2_FO_Mensual = pd.concat([df_L2_FO_Mensual, self.df_L2_FO], ignore_index=True)
-                df_L2_FO_Mensual.drop_duplicates(subset=['ID'], inplace=True)
-                
-                # Guardar el resultado actualizado
-                df_L2_FO_Mensual.to_csv(fo_file_path, index=False)
-            else:
-                # Si el archivo no existe, guardar el nuevo
-                self.df_L2_FO.to_csv(fo_file_path, index=False)
-            
-            if progress_callback:
-                progress_callback(93, "Actualizando reporte de ocupaciones...")
-                
-            # 2. Actualizar reporte de conteo de ocupaciones
-            ocup_file_path = os.path.join(self.output_folder_path, 'df_L2_OCUP_Mensual.csv')
-            if os.path.exists(ocup_file_path):
-                df_L2_OCUP_Mensual = pd.read_csv(ocup_file_path)
-                
-                # Concatenar y eliminar duplicados
-                df_L2_OCUP_Mensual = pd.concat([df_L2_OCUP_Mensual, self.df_L2_OCUP], ignore_index=True)
-                df_L2_OCUP_Mensual.drop_duplicates(subset=['ID'], inplace=True)
-                
-                # Guardar el resultado actualizado
-                df_L2_OCUP_Mensual.to_csv(ocup_file_path, index=False)
-            else:
-                # Si el archivo no existe, guardar el nuevo
-                self.df_L2_OCUP.to_csv(ocup_file_path, index=False)
-            
-            if progress_callback:
-                progress_callback(96, "Actualizando reporte de fallos de liberación...")
-                
-            # 3. Actualizar reporte de fallos de liberación
-            fl_file_path = os.path.join(self.output_folder_path, 'df_L2_FL_Mensual.csv')
-            if os.path.exists(fl_file_path):
-                df_L2_FL_Mensual = pd.read_csv(fl_file_path)
-                
-                # Concatenar y eliminar duplicados
-                df_L2_FL_Mensual = pd.concat([df_L2_FL_Mensual, self.df_L2_FL], ignore_index=True)
-                df_L2_FL_Mensual.drop_duplicates(subset=['ID'], inplace=True)
-                
-                # Guardar el resultado actualizado
-                df_L2_FL_Mensual.to_csv(fl_file_path, index=False)
-            else:
-                # Si el archivo no existe, guardar el nuevo
-                self.df_L2_FL.to_csv(fl_file_path, index=False)
-            
-            if progress_callback:
-                progress_callback(98, "Actualización de reportes completada")
-            
-            return True
-        except Exception as e:
-            if progress_callback:
-                progress_callback(None, f"Error al actualizar reportes: {str(e)}")
-            return False
-    
-    def save_dataframe(self):
-        """Guardar el DataFrame principal"""
-        try:
-            # Guardar el DataFrame principal
-            main_file_path = os.path.join(self.output_folder_path, 'df_L2_CDV.csv')
-            self.df.to_csv(main_file_path, index=False)
-            return True
-        except Exception as e:
-            return False
-    
-    def process_data(self, progress_callback=None):
-        """Ejecutar todo el proceso de análisis de datos"""
-        try:
-            # 1. Encontrar archivos CSV/Excel
-            if progress_callback:
-                progress_callback(0, "Buscando archivos CSV/Excel...")
-            num_files = self.find_files()
-            if num_files == 0:
-                if progress_callback:
-                    progress_callback(100, "No se encontraron archivos CSV/Excel para procesar")
-                return False
-            
-            # 2. Leer archivos CSV/Excel
-            if progress_callback:
-                progress_callback(5, f"Leyendo {num_files} archivos...")
-            if not self.read_files(progress_callback):
-                return False
-            
-            # 3. Preprocesar datos
-            if progress_callback:
-                progress_callback(20, "Preprocesando datos...")
-            self.preprocess_data(progress_callback)
-            
-            # 4. Calcular diferencias temporales
-            if progress_callback:
-                progress_callback(45, "Calculando diferencias temporales...")
-            self.calculate_time_differences(progress_callback)
-            
-            # 5. Calcular estadísticas
-            if progress_callback:
-                progress_callback(65, "Calculando estadísticas...")
-            self.calculate_statistics(progress_callback)
-            
-            # 6. Detectar anomalías
-            if progress_callback:
-                progress_callback(75, "Detectando anomalías...")
-            self.detect_anomalies(progress_callback)
-            
-            # 7. Preparar reportes
-            if progress_callback:
-                progress_callback(85, "Preparando reportes...")
-            self.prepare_reports(progress_callback)
-            
-            # 8. Actualizar reportes existentes
-            if progress_callback:
-                progress_callback(90, "Actualizando reportes existentes...")
-            self.update_reports(progress_callback)
-            
-            # 9. Guardar DataFrame principal
-            if progress_callback:
-                progress_callback(98, "Guardando DataFrame principal...")
-            self.save_dataframe()
-            
-            if progress_callback:
-                progress_callback(100, "Procesamiento CDV Línea 2 completado con éxito")
-            
-            return True
-        
-        except Exception as e:
-            if progress_callback:
-                progress_callback(None, f"Error en el procesamiento: {str(e)}")
-            return False
