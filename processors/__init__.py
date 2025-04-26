@@ -4,6 +4,7 @@ from processors.cdv_processor_l1 import CDVProcessorL1
 from processors.adv_processor_l1 import ADVProcessorL1
 from processors.cdv_processor_l2 import CDVProcessorL2
 from processors.adv_processor_l2 import ADVProcessorL2
+from processors.adv_processor_l2_csv import ADVProcessorL2CSV  # Añadir nueva clase
 from processors.cdv_processor_l4 import CDVProcessorL4
 from processors.adv_processor_l4 import ADVProcessorL4
 from processors.cdv_processor_l4a import CDVProcessorL4A
@@ -18,6 +19,7 @@ __all__ = [
     'ADVProcessorL1',
     'CDVProcessorL2',
     'ADVProcessorL2',
+    'ADVProcessorL2CSV',  # Añadir nueva clase
     'CDVProcessorL4',
     'ADVProcessorL4',
     'CDVProcessorL4A',

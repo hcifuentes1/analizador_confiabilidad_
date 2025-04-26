@@ -168,16 +168,21 @@ class CDVProcessorL2(BaseProcessor):
                 
                 # Crear columna de fecha y hora combinada
                 if 'tiempo' in df.columns:
-                    # Asumimos que 'tiempo' está en formato adecuado (si no, necesitaríamos convertirlo)
-                    df['Fecha Hora'] = pd.to_datetime(df['tiempo'], errors='coerce')
+                    # Especificar formato para evitar warning
+                    try:
+                        df['Fecha Hora'] = pd.to_datetime(df['tiempo'], format='%d/%m/%Y %H:%M:%S')
+                    except:
+                        # Si falla con el formato específico, intentar inferir el formato
+                        df['Fecha Hora'] = pd.to_datetime(df['tiempo'], errors='coerce')
                 else:
                     # Si no existe 'tiempo', intentamos con otras columnas
                     if 'ciclo' in df.columns and any('milits' in col for col in df.columns):
                         time_col = next(col for col in df.columns if 'milits' in col)
+                        # Especificar formato para evitar warning si es posible
                         df['Fecha Hora'] = pd.to_datetime(df['ciclo'] + " " + df[time_col], errors='coerce')
                 
                 # Procesar columnas de CDV
-                cdv_columns = [col for col in df.columns if 'CDV' in col or 'SigA' in col]
+                cdv_columns = [col for col in df.columns if 'CDV' in col and 'SigA' not in col]
                 if not cdv_columns:
                     # Si no hay columnas explícitamente marcadas como CDV, buscar columnas con patrones de valores binarios
                     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -294,7 +299,8 @@ class CDVProcessorL2(BaseProcessor):
             # Verificar si es un archivo con formato esperado
             if 'FECHA' in df.columns and 'HORA' in df.columns:
                 # Filtrar columnas que empiezan con 'CDV'
-                cdv_cols = [col for col in df.columns if col.startswith('CDV')]
+                # Filtrar columnas que empiezan con 'CDV' y no contienen 'SigA'
+                cdv_cols = [col for col in df.columns if col.startswith('CDV') and 'SigA' not in col]
                 if not cdv_cols:
                     return None
                 
@@ -320,15 +326,51 @@ class CDVProcessorL2(BaseProcessor):
                 df_melted['Subsistema'] = 'CDV'
                 
                 # Crear columna de fecha y hora combinada
-                df_melted['Fecha Hora'] = pd.to_datetime(
-                    df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
-                    errors='coerce'
-                )
+                # Especificar formato para evitar warning
+                try:
+                    # Primero intentamos con un formato específico
+                    format_str = None
+                    
+                    # Verificar el formato de la fecha
+                    fecha_sample = str(df_melted['FECHA'].iloc[0]) if not df_melted.empty else ""
+                    hora_sample = str(df_melted['HORA'].iloc[0]) if not df_melted.empty else ""
+                    
+                    # Determinar formato basado en muestras
+                    if '/' in fecha_sample:
+                        format_str = '%d/%m/%Y %H:%M:%S'
+                    elif '-' in fecha_sample:
+                        format_str = '%Y-%m-%d %H:%M:%S'
+                    
+                    if format_str:
+                        df_melted['Fecha Hora'] = pd.to_datetime(
+                            df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
+                            format=format_str, 
+                            errors='coerce'
+                        )
+                    else:
+                        df_melted['Fecha Hora'] = pd.to_datetime(
+                            df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
+                            errors='coerce'
+                        )
+                except:
+                    # Si falla, usamos el método predeterminado
+                    df_melted['Fecha Hora'] = pd.to_datetime(
+                        df_melted['FECHA'].astype(str) + ' ' + df_melted['HORA'].astype(str),
+                        errors='coerce'
+                    )
                 
-                # Modificar Estado: considerar 1 como "Ocupacion" y 0 como "Liberacion"
-                df_melted['Estado'] = df_melted['Estado'].apply(
-                    lambda x: 'Ocupacion' if x == 0 else 'Liberacion' if x == 1 else 'Desconocido'
-                )
+                # Modificar Estado: considerar 1 como "Liberacion" y 0 como "Ocupacion"
+                # Se utiliza infer_objects para evitar el warning futuro
+                # Opción 1: Para versiones más recientes de pandas
+                if hasattr(df_melted, 'infer_objects'):
+                    df_melted['Estado'] = df_melted['Estado'].map(
+                        lambda x: 'Ocupacion' if x == 0 else 'Liberacion' if x == 1 else 'Desconocido'
+                    ).infer_objects(copy=False)
+                else:
+                    # Opción 2: Para versiones antiguas de pandas
+                    df_melted['Estado'] = df_melted['Estado'].map(
+                        lambda x: 'Ocupacion' if x == 0 else 'Liberacion' if x == 1 else 'Desconocido'
+                    )
                 
                 # Seleccionar columnas finales
                 df_melted = df_melted[['Fecha Hora', 'Equipo', 'Estacion', 'Subsistema', 'Estado']]
@@ -381,9 +423,15 @@ class CDVProcessorL2(BaseProcessor):
         # Crear copia del DataFrame
         self.df_L2_2 = self.df.copy()
         
-        # Convertir estados a numéricos
-        self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Liberacion', 1)
-        self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Ocupacion', 0)
+        # Convertir estados a numéricos usando infer_objects para evitar warnings
+        if hasattr(self.df_L2_2, 'infer_objects'):
+            # Para versiones más recientes de pandas
+            self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Liberacion', 1).infer_objects(copy=False)
+            self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Ocupacion', 0).infer_objects(copy=False)
+        else:
+            # Para versiones antiguas de pandas
+            self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Liberacion', 1)
+            self.df_L2_2['Estado'] = self.df_L2_2['Estado'].replace('Ocupacion', 0)
         
         # Ordenar y filtrar
         self.df_L2_2 = self.df_L2_2.sort_values(["Equipo", "Fecha Hora"])
@@ -614,3 +662,142 @@ class CDVProcessorL2(BaseProcessor):
             progress_callback(90, "Preparación de reportes completada")
         
         return True
+    
+    def update_reports(self, progress_callback=None):
+        """Actualizar los reportes existentes con nuevos datos"""
+        try:
+            if progress_callback:
+                progress_callback(90, "Iniciando actualización de reportes...")
+            
+            # 1. Actualizar reporte de fallos de ocupación
+            fo_file_path = os.path.join(self.output_folder_path, 'df_L2_FO_Mensual.csv')
+            if os.path.exists(fo_file_path):
+                df_L2_FO_Mensual = pd.read_csv(fo_file_path)
+                
+                # Concatenar y eliminar duplicados
+                df_L2_FO_Mensual = pd.concat([df_L2_FO_Mensual, self.df_L2_FO], ignore_index=True)
+                df_L2_FO_Mensual.drop_duplicates(subset=['ID'], inplace=True)
+                
+                # Guardar el resultado actualizado
+                df_L2_FO_Mensual.to_csv(fo_file_path, index=False)
+            else:
+                # Si el archivo no existe, guardar el nuevo
+                self.df_L2_FO.to_csv(fo_file_path, index=False)
+            
+            if progress_callback:
+                progress_callback(93, "Actualizando reporte de ocupaciones...")
+                
+            # 2. Actualizar reporte de conteo de ocupaciones
+            ocup_file_path = os.path.join(self.output_folder_path, 'df_L2_OCUP_Mensual.csv')
+            if os.path.exists(ocup_file_path):
+                df_L2_OCUP_Mensual = pd.read_csv(ocup_file_path)
+                
+                # Concatenar y eliminar duplicados
+                df_L2_OCUP_Mensual = pd.concat([df_L2_OCUP_Mensual, self.df_L2_OCUP], ignore_index=True)
+                df_L2_OCUP_Mensual.drop_duplicates(subset=['ID'], inplace=True)
+                
+                # Guardar el resultado actualizado
+                df_L2_OCUP_Mensual.to_csv(ocup_file_path, index=False)
+            else:
+                # Si el archivo no existe, guardar el nuevo
+                self.df_L2_OCUP.to_csv(ocup_file_path, index=False)
+            
+            if progress_callback:
+                progress_callback(96, "Actualizando reporte de fallos de liberación...")
+                
+            # 3. Actualizar reporte de fallos de liberación
+            fl_file_path = os.path.join(self.output_folder_path, 'df_L2_FL_Mensual.csv')
+            if os.path.exists(fl_file_path):
+                df_L2_FL_Mensual = pd.read_csv(fl_file_path)
+                
+                # Concatenar y eliminar duplicados
+                df_L2_FL_Mensual = pd.concat([df_L2_FL_Mensual, self.df_L2_FL], ignore_index=True)
+                df_L2_FL_Mensual.drop_duplicates(subset=['ID'], inplace=True)
+                
+                # Guardar el resultado actualizado
+                df_L2_FL_Mensual.to_csv(fl_file_path, index=False)
+            else:
+                # Si el archivo no existe, guardar el nuevo
+                self.df_L2_FL.to_csv(fl_file_path, index=False)
+            
+            if progress_callback:
+                progress_callback(98, "Actualización de reportes completada")
+            
+            return True
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error al actualizar reportes: {str(e)}")
+            return False
+    
+    def save_dataframe(self):
+        """Guardar el DataFrame principal"""
+        try:
+            # Guardar el DataFrame principal
+            main_file_path = os.path.join(self.output_folder_path, 'df_L2_CDV.csv')
+            self.df.to_csv(main_file_path, index=True)
+            return True
+        except Exception as e:
+            return False
+    
+    def process_data(self, progress_callback=None):
+        """Ejecutar todo el proceso de análisis de datos"""
+        try:
+            # 1. Encontrar archivos
+            if progress_callback:
+                progress_callback(0, "Buscando archivos para Línea 2 CDV...")
+            num_files = self.find_files()
+            if num_files == 0:
+                if progress_callback:
+                    progress_callback(100, "No se encontraron archivos para procesar")
+                return False
+            
+            # 2. Leer archivos
+            if progress_callback:
+                progress_callback(5, f"Leyendo {num_files} archivos...")
+            if not self.read_files(progress_callback):
+                return False
+            
+            # 3. Preprocesamiento
+            if progress_callback:
+                progress_callback(20, "Preprocesando datos...")
+            self.preprocess_data(progress_callback)
+            
+            # 4. Cálculo de diferencias temporales
+            if progress_callback:
+                progress_callback(45, "Calculando diferencias temporales...")
+            self.calculate_time_differences(progress_callback)
+            
+            # 5. Cálculo de estadísticas
+            if progress_callback:
+                progress_callback(65, "Calculando estadísticas...")
+            self.calculate_statistics(progress_callback)
+            
+            # 6. Detección de anomalías
+            if progress_callback:
+                progress_callback(75, "Detectando anomalías...")
+            self.detect_anomalies(progress_callback)
+            
+            # 7. Preparación de reportes
+            if progress_callback:
+                progress_callback(85, "Preparando reportes...")
+            self.prepare_reports(progress_callback)
+            
+            # 8. Actualización de reportes existentes
+            if progress_callback:
+                progress_callback(90, "Actualizando reportes existentes...")
+            self.update_reports(progress_callback)
+            
+            # 9. Guardar DataFrame principal
+            if progress_callback:
+                progress_callback(98, "Guardando DataFrame principal...")
+            self.save_dataframe()
+            
+            if progress_callback:
+                progress_callback(100, "Procesamiento CDV Línea 2 completado con éxito")
+            
+            return True
+        
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error en el procesamiento: {str(e)}")
+            return False
