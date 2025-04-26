@@ -100,14 +100,17 @@ class LineTab:
                     value="ADV", command=self.toggle_analysis_type).grid(row=0, column=1, padx=20, pady=5, sticky=tk.W)
         
         # Sección de selección de tipo de datos (solo para Línea 2)
+        # En la clase LineTab, método create_widgets
         if self.title == "Línea 2":
-            data_type_frame = ttk.LabelFrame(main_frame, text="Tipo de Datos", padding="10")
-            data_type_frame.pack(fill=tk.X, padx=5, pady=5)
+            # Añadir selector de formato para ADV en Línea 2
+            adv_format_frame = ttk.LabelFrame(analysis_frame, text="Formato ADV", padding="5")
+            adv_format_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W+tk.E)
             
-            ttk.Radiobutton(data_type_frame, text="Datos Sacem", variable=self.data_type_var, 
-                        value="Sacem").grid(row=0, column=0, padx=20, pady=5, sticky=tk.W)
-            ttk.Radiobutton(data_type_frame, text="Datos SCADA (En desarrollo)", variable=self.data_type_var, 
-                        value="SCADA", state=tk.DISABLED).grid(row=0, column=1, padx=20, pady=5, sticky=tk.W)
+            self.adv_format_var = tk.StringVar(value="ADV")
+            ttk.Radiobutton(adv_format_frame, text="Formato Estándar", variable=self.adv_format_var, 
+                        value="ADV").grid(row=0, column=0, padx=20, pady=5, sticky=tk.W)
+            ttk.Radiobutton(adv_format_frame, text="Formato CSV (Kag)", variable=self.adv_format_var, 
+                        value="ADV-CSV").grid(row=0, column=1, padx=20, pady=5, sticky=tk.W)
         
         # Sección de selección de carpetas
         folder_frame = ttk.LabelFrame(main_frame, text="Rutas de archivos", padding="10")
