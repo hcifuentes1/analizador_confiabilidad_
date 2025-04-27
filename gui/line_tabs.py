@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import threading
+import pandas as pd  # Añadir esta línea
 from datetime import datetime
 from dashboard.dashboard_integration import DashboardIntegration
 
@@ -111,6 +112,12 @@ class LineTab:
                         value="ADV").grid(row=0, column=0, padx=20, pady=5, sticky=tk.W)
             ttk.Radiobutton(adv_format_frame, text="Formato CSV (Kag)", variable=self.adv_format_var, 
                         value="ADV-CSV").grid(row=0, column=1, padx=20, pady=5, sticky=tk.W)
+            
+            # Agregar un callback para mostrar cuando cambia el formato
+            def on_format_change(*args):
+                self.log(f"Formato de análisis ADV seleccionado: {self.adv_format_var.get()}")
+            
+            self.adv_format_var.trace_add("write", on_format_change)
         
         # Sección de selección de carpetas
         folder_frame = ttk.LabelFrame(main_frame, text="Rutas de archivos", padding="10")
@@ -260,9 +267,19 @@ class LineTab:
         
         if analysis_type == "CDV":
             self.cdv_config_frame.pack(fill=tk.X, padx=5, pady=5)
+            
+            # Ocultar el panel de formato ADV si existe
+            if hasattr(self, 'adv_format_frame') and self.adv_format_frame.winfo_exists():
+                self.adv_format_frame.pack_forget()
+                
             self.log(f"Tipo de análisis seleccionado: Circuitos de Vía (CDV)")
         else:
             self.cdv_config_frame.pack_forget()
+            
+            # Mostrar el panel de formato ADV si existe
+            if hasattr(self, 'adv_format_frame') and self.adv_format_frame.winfo_exists():
+                self.adv_format_frame.pack(fill=tk.X, padx=5, pady=5)
+                
             self.log(f"Tipo de análisis seleccionado: Agujas (ADV)")
     
     def browse_source(self):
@@ -324,6 +341,16 @@ class LineTab:
         # Obtener datos para procesamiento
         line = self.title.replace("Línea ", "L")
         
+        # Para Línea 2 y análisis ADV, verificar el formato seleccionado
+        actual_analysis_type = analysis_type  # Guardamos el tipo original para mostrar mensajes
+        
+        if line == "L2" and analysis_type == "ADV" and hasattr(self, 'adv_format_var'):
+            adv_format = self.adv_format_var.get()
+            self.log(f"Formato ADV seleccionado: {adv_format}")
+            if adv_format == "ADV-CSV":
+                analysis_type = "ADV-CSV"  # Cambiamos el tipo para el procesador
+                self.log(f"Usando procesador específico para CSV: {analysis_type}")
+        
         # Obtener tipo de datos para Línea 2
         data_type = "Sacem"  # Valor por defecto
         if hasattr(self, 'data_type_var'):
@@ -362,22 +389,25 @@ class LineTab:
             self.log(f"Tipo de datos seleccionado: {data_type}")
         
         # Reiniciar la barra de progreso correspondiente
-        if analysis_type == "CDV":
-            self.progress_var_cdv.set(0)
-            self.status_var_cdv.set(f"Iniciando procesamiento para {analysis_type}...")
+        if actual_analysis_type == "CDV":
+            progress_var = self.progress_var_cdv
+            status_var = self.status_var_cdv
             self.cdv_processing_complete = False
             self.view_cdv_button.config(state=tk.DISABLED)
-        else:
-            self.progress_var_adv.set(0)
-            self.status_var_adv.set(f"Iniciando procesamiento para {analysis_type}...")
+        else:  # ADV (tanto estándar como CSV)
+            progress_var = self.progress_var_adv
+            status_var = self.status_var_adv
             self.adv_processing_complete = False
             self.view_adv_button.config(state=tk.DISABLED)
+        
+        progress_var.set(0)
+        status_var.set(f"Iniciando procesamiento para {actual_analysis_type}...")
         
         # Iniciar procesamiento
         success = self.parent_app.start_processing(line, analysis_type, source_path, dest_path, parameters)
         
         if not success:
-            self.log(f"Error al iniciar el procesamiento de {analysis_type}")
+            self.log(f"Error al iniciar el procesamiento de {actual_analysis_type}")
     
     def start_both_processing(self):
         """Iniciar procesamiento tanto para CDV como para ADV"""
@@ -509,38 +539,40 @@ class LineTab:
     
     def update_progress(self, analysis_type, progress, message):
         """Actualizar barra de progreso y mensaje de estado"""
+        # Determinar qué barra de progreso y mensaje actualizar
+        # Para ADV-CSV, usamos la misma barra que para ADV
         if analysis_type == "CDV":
-            if progress is not None:
-                self.progress_var_cdv.set(progress)
-            
-            if message:
-                self.status_var_cdv.set(message)
-                self.log(f"[CDV] {message}")
-                
-            # Actualizar estado de procesamiento
-            if progress == 100:
-                self.cdv_processing_complete = True
-                self.view_cdv_button.config(state=tk.NORMAL)
-                self.log("[CDV] Procesamiento completo. Se puede visualizar el dashboard.")
+            progress_var = self.progress_var_cdv
+            status_var = self.status_var_cdv
+            button = self.view_cdv_button
+            complete_flag = 'cdv_processing_complete'
+            log_prefix = "[CDV]"
+        else:  # ADV o ADV-CSV
+            progress_var = self.progress_var_adv
+            status_var = self.status_var_adv
+            button = self.view_adv_button
+            complete_flag = 'adv_processing_complete'
+            log_prefix = "[ADV-CSV]" if analysis_type == "ADV-CSV" else "[ADV]"
         
-        elif analysis_type == "ADV":
-            if progress is not None:
-                self.progress_var_adv.set(progress)
+        # Actualizar progreso si está disponible
+        if progress is not None:
+            progress_var.set(progress)
+        
+        # Actualizar mensaje de estado si está disponible
+        if message:
+            status_var.set(message)
+            self.log(f"{log_prefix} {message}")
             
-            if message:
-                self.status_var_adv.set(message)
-                self.log(f"[ADV] {message}")
-                
-            # Actualizar estado de procesamiento
-            if progress == 100:
-                self.adv_processing_complete = True
-                self.view_adv_button.config(state=tk.NORMAL)
-                self.log("[ADV] Procesamiento completo. Se puede visualizar el dashboard.")
+        # Actualizar estado de procesamiento
+        if progress == 100:
+            setattr(self, complete_flag, True)
+            button.config(state=tk.NORMAL)
+            self.log(f"{log_prefix} Procesamiento completo. Se puede visualizar el dashboard.")
     
     def view_results(self, analysis_type):
         """Visualizar resultados en dashboard web"""
         try:
-            # Verificar si el procesamiento está completo
+            # Determinar qué tipo de procesamiento verificar
             if analysis_type == "CDV" and not self.cdv_processing_complete:
                 messagebox.showwarning("Aviso", "El procesamiento de CDV no ha finalizado. No hay resultados para visualizar.")
                 return
@@ -558,12 +590,69 @@ class LineTab:
             # Obtener la línea
             line = self.title.replace("Línea ", "L")
             
+            # Para ADV-CSV, verificar si existen los archivos necesarios
+            dashboard_analysis_type = "ADV"  # Siempre usamos ADV para el dashboard
+            
+            # Verificar existencia de archivos necesarios para el dashboard
+            required_files = []
+            if dashboard_analysis_type == "ADV":
+                required_files = [
+                    f'df_{line}_ADV_MOV.csv',
+                    f'df_{line}_ADV_DISC_Mensual.csv',
+                    f'df_{line}_ADV_MOV_Mensual.csv'
+                ]
+            elif dashboard_analysis_type == "CDV":
+                required_files = [
+                    f'df_{line}_CDV.csv',
+                    f'df_{line}_FO_Mensual.csv',
+                    f'df_{line}_FL_Mensual.csv',
+                    f'df_{line}_OCUP_Mensual.csv'
+                ]
+            
+            # Verificar archivos
+            missing_files = []
+            for file in required_files:
+                file_path = os.path.join(dest_path, file)
+                if not os.path.exists(file_path):
+                    missing_files.append(file)
+                    self.log(f"Archivo no encontrado: {file}")
+                else:
+                    file_size = os.path.getsize(file_path)
+                    self.log(f"Archivo encontrado: {file} - Tamaño: {file_size/1024:.2f} KB")
+                    
+                    # Leer archivo para verificar contenido
+                    try:
+                        df = pd.read_csv(file_path)
+                        self.log(f"  - Registros: {len(df)}")
+                        self.log(f"  - Columnas: {', '.join(df.columns.tolist()[:5])}...")
+                    except Exception as e:
+                        self.log(f"  - Error al leer archivo: {str(e)}")
+            
+            if missing_files:
+                self.log(f"Faltan archivos necesarios para el dashboard: {', '.join(missing_files)}")
+                # Hacer una copia de los archivos existentes con el nombre correcto
+                
+                # Intentar autofix para archivos CSV
+                if analysis_type == "ADV-CSV":
+                    self.log("Intentando arreglar automáticamente archivos para dashboard...")
+                    
+                    # Copiar df_L2_ADV_MOV_CSV.csv a df_L2_ADV_MOV.csv si existe
+                    csv_mov_path = os.path.join(dest_path, f'df_{line}_ADV_MOV_CSV.csv')
+                    std_mov_path = os.path.join(dest_path, f'df_{line}_ADV_MOV.csv')
+                    if os.path.exists(csv_mov_path) and not os.path.exists(std_mov_path):
+                        try:
+                            import shutil
+                            shutil.copy2(csv_mov_path, std_mov_path)
+                            self.log(f"Copiado {csv_mov_path} a {std_mov_path}")
+                        except Exception as e:
+                            self.log(f"Error copiando archivo: {str(e)}")
+            
             # Inicializar el integrador de dashboard si aún no existe
             if self.dashboard_integration is None:
                 self.dashboard_integration = DashboardIntegration(dest_path, self.frame.winfo_toplevel())
             
             # Lanzar el dashboard
-            self.dashboard_integration.launch_dashboard(line, analysis_type)
+            self.dashboard_integration.launch_dashboard(line, dashboard_analysis_type)
             
             self.log(f"[{analysis_type}] Lanzando visualización de resultados...")
             

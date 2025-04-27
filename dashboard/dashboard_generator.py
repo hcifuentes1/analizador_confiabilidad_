@@ -119,19 +119,28 @@ class DashboardGenerator:
                 disc_file_path = os.path.join(self.output_folder, f'df_{self.line}_ADV_DISC_Mensual.csv')
                 mov_file_path = os.path.join(self.output_folder, f'df_{self.line}_ADV_MOV_Mensual.csv')
                 
-                if os.path.exists(disc_file_path):
-                    self.dataframes['discordancias'] = pd.read_csv(disc_file_path)
-                    # Convertir fechas
-                    if 'Fecha Hora' in self.dataframes['discordancias'].columns:
-                        self.dataframes['discordancias']['Fecha Hora'] = pd.to_datetime(
-                            self.dataframes['discordancias']['Fecha Hora'], dayfirst=True, errors='coerce')
+                print(f"Loading ADV data: Checking files {disc_file_path} and {mov_file_path}")
                 
                 if os.path.exists(mov_file_path):
                     self.dataframes['movimientos'] = pd.read_csv(mov_file_path)
+                    print(f"Loaded movimientos: {len(self.dataframes['movimientos'])} rows")
+                    
+                    # Convertir fechas si existen columnas de fecha
+                    for date_col in ['Fecha', 'Fecha Hora']:
+                        if date_col in self.dataframes['movimientos'].columns:
+                            self.dataframes['movimientos'][date_col] = pd.to_datetime(
+                                self.dataframes['movimientos'][date_col], errors='coerce')
+                    
+                    print(f"Columns in movimientos: {self.dataframes['movimientos'].columns.tolist()}")
+                
+                if os.path.exists(disc_file_path):
+                    self.dataframes['discordancias'] = pd.read_csv(disc_file_path)
+                    print(f"Loaded discordancias: {len(self.dataframes['discordancias'])} rows")
+                    
                     # Convertir fechas
-                    if 'Fecha' in self.dataframes['movimientos'].columns:
-                        self.dataframes['movimientos']['Fecha'] = pd.to_datetime(
-                            self.dataframes['movimientos']['Fecha'], errors='coerce')
+                    if 'Fecha Hora' in self.dataframes['discordancias'].columns:
+                        self.dataframes['discordancias']['Fecha Hora'] = pd.to_datetime(
+                            self.dataframes['discordancias']['Fecha Hora'], errors='coerce')
             
             # Verificar si se cargaron datos
             if any(not df.empty for df in self.dataframes.values()):
@@ -678,6 +687,20 @@ class DashboardGenerator:
             # Generar insights iniciales si no existen
             if not self.insights:
                 self.insights = self.generate_insights()
+                
+            # Después de cargar los dataframes pero antes de crear el dashboard
+            if hasattr(self, 'dataframes') and self.dataframes:
+                print(f"Dashboard: Dataframes cargados: {list(self.dataframes.keys())}")
+                
+                # Depuración especial para ADV
+                if self.analysis_type == "ADV":
+                    if 'movimientos' in self.dataframes:
+                        print(f"Dashboard: Datos de movimientos: {len(self.dataframes['movimientos'])} filas")
+                        if 'Equipo' in self.dataframes['movimientos'].columns:
+                            equipos = self.dataframes['movimientos']['Equipo'].unique()
+                            print(f"Dashboard: Equipos disponibles: {equipos}")
+                        else:
+                            print(f"Dashboard: Columnas en movimientos: {self.dataframes['movimientos'].columns.tolist()}")
             
             # Crear aplicación Dash con estilos externos
             self.app = dash.Dash(
@@ -1158,31 +1181,54 @@ class DashboardGenerator:
                 return fig
             
         elif self.analysis_type == "ADV":
-            if 'discordancias' in self.dataframes and 'Fecha Hora' in self.dataframes['discordancias'].columns:
-                df = self.dataframes['discordancias'].copy()
+            if 'movimientos' in dfs and not dfs['movimientos'].empty:
+                df = dfs['movimientos'].copy()
                 
-                # Agrupar por fecha para contar discordancias
-                df['fecha'] = pd.to_datetime(df['Fecha Hora']).dt.date
-                disc_por_dia = df.groupby('fecha').size().reset_index(name='conteo')
-                disc_por_dia['fecha'] = pd.to_datetime(disc_por_dia['fecha'])
+                # Impresión de diagnóstico
+                print(f"create_time_trend_figure: Columnas en df: {df.columns.tolist()}")
+                print(f"create_time_trend_figure: Primeras filas de df: {df.head(2).to_dict('records')}")
                 
-                fig = px.line(
-                    disc_por_dia, 
-                    x='fecha', 
-                    y='conteo',
-                    labels={'fecha': 'Fecha', 'conteo': 'Número de Discordancias'},
-                    title="Tendencia de Discordancias en Agujas",
-                    color_discrete_sequence=[self.colors['danger']]
-                )
+                # Convertir 'Fecha' a datetime si es string
+                if 'Fecha' in df.columns and isinstance(df['Fecha'].iloc[0], str):
+                    df['Fecha'] = pd.to_datetime(df['Fecha'])
                 
-                fig.update_layout(
-                    plot_bgcolor='white',
-                    paper_bgcolor='white',
-                    font_color=self.colors['text'],
-                    margin=dict(l=10, r=10, t=50, b=10)
-                )
-                
-                return fig
+                # Agrupar por fecha para contar movimientos
+                if 'Fecha' in df.columns:
+                    # Asegurarse de que Fecha sea fecha (no string)
+                    if df['Fecha'].dtype != 'datetime64[ns]':
+                        df['fecha_dt'] = pd.to_datetime(df['Fecha'], errors='coerce')
+                    else:
+                        df['fecha_dt'] = df['Fecha']
+                    
+                    # Agrupar por fecha
+                    mov_por_dia = df.groupby('fecha_dt').size().reset_index(name='conteo')
+                    
+                    # Ordenar por fecha
+                    mov_por_dia = mov_por_dia.sort_values('fecha_dt')
+                    
+                    # Crear figura
+                    fig = px.line(
+                        mov_por_dia, 
+                        x='fecha_dt', 
+                        y='conteo',
+                        labels={'fecha_dt': 'Fecha', 'conteo': 'Número de Movimientos'},
+                        title="Tendencia de Movimientos de Agujas",
+                        color_discrete_sequence=[self.colors['primary']]
+                    )
+                    
+                    fig.update_layout(
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        font_color=self.colors['text'],
+                        margin=dict(l=10, r=10, t=50, b=10)
+                    )
+                    
+                    return fig
+            
+            # Si no hay datos de movimientos, verificar discordancias
+            if 'discordancias' in dfs and not dfs['discordancias'].empty:
+                # Código para mostrar tendencia de discordancias...
+                pass
         
         # Figura vacía en caso de no tener datos
         fig = go.Figure()
@@ -1233,34 +1279,44 @@ class DashboardGenerator:
                 return fig
                 
         elif self.analysis_type == "ADV":
-            if 'discordancias' in dfs and 'Equipo Estacion' in dfs['discordancias'].columns:
-                df = dfs['discordancias'].copy()
+            if 'movimientos' in dfs and not dfs['movimientos'].empty:
+                df = dfs['movimientos'].copy()
                 
-                # Contar discordancias por equipo
-                disc_por_equipo = df['Equipo Estacion'].value_counts().reset_index()
-                disc_por_equipo.columns = ['Equipo', 'Conteo']
+                # Impresión de diagnóstico
+                print(f"create_equipment_distribution_figure: Columnas en df: {df.columns.tolist()}")
                 
-                # Tomar los 15 equipos con más discordancias
-                top_equipos = disc_por_equipo.head(15)
-                
-                fig = px.bar(
-                    top_equipos, 
-                    x='Equipo', 
-                    y='Conteo',
-                    labels={'Equipo': 'Aguja', 'Conteo': 'Número de Discordancias'},
-                    title="Distribución de Discordancias por Aguja (Top 15)",
-                    color_discrete_sequence=[self.colors['primary']]
-                )
-                
-                fig.update_layout(
-                    plot_bgcolor='white',
-                    paper_bgcolor='white',
-                    font_color=self.colors['text'],
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    xaxis={'categoryorder':'total descending'}
-                )
-                
-                return fig
+                # Contar movimientos por equipo
+                if 'Equipo' in df.columns:
+                    mov_por_equipo = df['Equipo'].value_counts().reset_index()
+                    mov_por_equipo.columns = ['Equipo', 'Conteo']
+                    
+                    # Ordenar por conteo descendente
+                    mov_por_equipo = mov_por_equipo.sort_values('Conteo', ascending=False)
+                    
+                    # Crear figura
+                    fig = px.bar(
+                        mov_por_equipo, 
+                        x='Equipo', 
+                        y='Conteo',
+                        labels={'Equipo': 'Aparato de Vía', 'Conteo': 'Número de Movimientos'},
+                        title="Distribución de Movimientos por Aparato de Vía",
+                        color_discrete_sequence=[self.colors['primary']]
+                    )
+                    
+                    fig.update_layout(
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        font_color=self.colors['text'],
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        xaxis={'categoryorder':'total descending'}
+                    )
+                    
+                    return fig
+            
+            # Si no hay datos de movimientos, verificar discordancias
+            if 'discordancias' in dfs and not dfs['discordancias'].empty:
+                # Código para mostrar distribución de discordancias...
+                pass
         
         # Figura vacía en caso de no tener datos
         fig = go.Figure()
@@ -1640,8 +1696,17 @@ class DashboardGenerator:
                 equipos.extend(self.dataframes['fallos_liberacion']['Equipo'].unique())
         
         elif self.analysis_type == "ADV":
-            if 'discordancias' in self.dataframes and 'Equipo Estacion' in self.dataframes['discordancias'].columns:
-                equipos.extend(self.dataframes['discordancias']['Equipo Estacion'].unique())
+            # Primero intentar con dataframes específicos
+            for df_name in ['discordancias', 'movimientos']:
+                if df_name in self.dataframes and 'Equipo' in self.dataframes[df_name].columns:
+                    equipos.extend(self.dataframes[df_name]['Equipo'].unique())
+            
+            # Como fallback, intentar buscar en todos los dataframes
+            if not equipos:
+                for df_name, df in self.dataframes.items():
+                    if 'Equipo' in df.columns:
+                        equipos.extend(df['Equipo'].unique())
+                        print(f"Dashboard: Equipos encontrados en {df_name}: {df['Equipo'].unique()}")
         
         return sorted(list(set(equipos)))
     
