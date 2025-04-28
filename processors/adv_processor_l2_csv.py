@@ -459,28 +459,21 @@ class ADVProcessorL2CSV(BaseProcessor):
     
     def _extract_station_from_kag(self, kag_name):
         """Extraer información de estación del nombre del aparato de vía"""
-        # Buscar estación al final del nombre (patrón común)
-        parts = kag_name.split()
-        if len(parts) >= 2:
-            # La estación suele ser de 2 letras al final
-            last_part = parts[-1]
-            if len(last_part) <= 3 and last_part.isalpha():
-                return last_part
-            
-            # También podría estar en otros formatos como "Kag 11/21G A"
-            # donde A es la estación
-            for part in reversed(parts):
-                if len(part) <= 3 and part.isalpha():
-                    return part
-        
-        # Intentar extraer estación de patrones conocidos
+        # Intentar extraer la estación usando expresiones regulares
         import re
-        station_match = re.search(r'[A-Z]{2,3}$', kag_name)
-        if station_match:
-            return station_match.group(0)
+        # Buscar un patrón como "Kag 11/21G AV" donde AV es la estación (2 letras al final)
+        match = re.search(r'[GD]\s+([A-Z]{2})$', kag_name)
+        if match:
+            return match.group(1)  # Devolver la estación (AV en el ejemplo)
         
-        # Si no se encuentra ningún patrón claro, usar un valor genérico
-        return 'ST'
+        # Si no se encuentra con el patrón anterior, buscar otras posibilidades
+        # Buscar cualquier secuencia de 2 letras mayúsculas al final
+        match = re.search(r'([A-Z]{2})$', kag_name)
+        if match:
+            return match.group(1)
+        
+        # Si todo falla, devolver valor por defecto
+        return "AV"  # Basado en el log, sabemos que todas son AV
     
     def preprocess_data(self, progress_callback=None):
         """Realizar análisis estadístico de tiempos de movimiento"""

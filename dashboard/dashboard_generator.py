@@ -19,6 +19,7 @@ import threading
 import logging
 from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.arima.model import ARIMA
+from dash import dash_table, html  # Asegurarse de que dash_table esté importado
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -86,8 +87,14 @@ class DashboardGenerator:
                 ocup_file_path = os.path.join(self.output_folder, f'df_{self.line}_OCUP_Mensual.csv')
                 main_file_path = os.path.join(self.output_folder, f'df_{self.line}_CDV.csv')
                 
+                # Imprimir rutas para verificación
+                logger.info(f"Buscando archivos CDV en: {self.output_folder}")
+                logger.info(f"Archivo FO: {fo_file_path} (existe: {os.path.exists(fo_file_path)})")
+                
                 if os.path.exists(fo_file_path):
                     self.dataframes['fallos_ocupacion'] = pd.read_csv(fo_file_path)
+                    logger.info(f"Cargado archivo FO: {len(self.dataframes['fallos_ocupacion'])} filas")
+                    
                     # Convertir fechas
                     if 'Fecha Hora' in self.dataframes['fallos_ocupacion'].columns:
                         self.dataframes['fallos_ocupacion']['Fecha Hora'] = pd.to_datetime(
@@ -115,44 +122,107 @@ class DashboardGenerator:
                             self.dataframes['main']['Fecha Hora'], errors='coerce')
                 
             elif self.analysis_type == "ADV":
-                # Cargar archivos ADV
-                disc_file_path = os.path.join(self.output_folder, f'df_{self.line}_ADV_DISC_Mensual.csv')
-                mov_file_path = os.path.join(self.output_folder, f'df_{self.line}_ADV_MOV_Mensual.csv')
+                # Cargar archivos ADV (tanto estándar como CSV)
+                # Intentar diferentes variantes de nombres para mayor compatibilidad
                 
-                print(f"Loading ADV data: Checking files {disc_file_path} and {mov_file_path}")
+                # Para discordancias
+                disc_file_paths = [
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_DISC_Mensual.csv'),  # Formato estándar
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_DISC.csv'),          # Archivo principal
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_DISC_CSV.csv')       # Formato para CSV
+                ]
                 
-                if os.path.exists(mov_file_path):
-                    self.dataframes['movimientos'] = pd.read_csv(mov_file_path)
-                    print(f"Loaded movimientos: {len(self.dataframes['movimientos'])} rows")
-                    
-                    # Convertir fechas si existen columnas de fecha
-                    for date_col in ['Fecha', 'Fecha Hora']:
-                        if date_col in self.dataframes['movimientos'].columns:
-                            self.dataframes['movimientos'][date_col] = pd.to_datetime(
-                                self.dataframes['movimientos'][date_col], errors='coerce')
-                    
-                    print(f"Columns in movimientos: {self.dataframes['movimientos'].columns.tolist()}")
+                # Para movimientos
+                mov_file_paths = [
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_MOV_Mensual.csv'),   # Formato estándar
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_MOV.csv'),           # Archivo principal
+                    os.path.join(self.output_folder, f'df_{self.line}_ADV_MOV_CSV.csv')        # Formato para CSV
+                ]
                 
-                if os.path.exists(disc_file_path):
-                    self.dataframes['discordancias'] = pd.read_csv(disc_file_path)
-                    print(f"Loaded discordancias: {len(self.dataframes['discordancias'])} rows")
-                    
-                    # Convertir fechas
-                    if 'Fecha Hora' in self.dataframes['discordancias'].columns:
-                        self.dataframes['discordancias']['Fecha Hora'] = pd.to_datetime(
-                            self.dataframes['discordancias']['Fecha Hora'], errors='coerce')
+                # Imprimir rutas para verificación
+                logger.info(f"Buscando archivos ADV en: {self.output_folder}")
+                
+                # Cargar discordancias (usar el primer archivo que exista)
+                for disc_path in disc_file_paths:
+                    if os.path.exists(disc_path):
+                        logger.info(f"Cargando discordancias desde: {disc_path}")
+                        self.dataframes['discordancias'] = pd.read_csv(disc_path)
+                        
+                        # Convertir fechas
+                        if 'Fecha Hora' in self.dataframes['discordancias'].columns:
+                            self.dataframes['discordancias']['Fecha Hora'] = pd.to_datetime(
+                                self.dataframes['discordancias']['Fecha Hora'], errors='coerce')
+                        
+                        logger.info(f"Cargado archivo de discordancias: {len(self.dataframes['discordancias'])} filas")
+                        break
+                
+                # Cargar movimientos (usar el primer archivo que exista)
+                for mov_path in mov_file_paths:
+                    if os.path.exists(mov_path):
+                        logger.info(f"Cargando movimientos desde: {mov_path}")
+                        self.dataframes['movimientos'] = pd.read_csv(mov_path)
+                        
+                        # Convertir fechas si existen columnas de fecha
+                        for date_col in ['Fecha', 'Fecha Hora']:
+                            if date_col in self.dataframes['movimientos'].columns:
+                                self.dataframes['movimientos'][date_col] = pd.to_datetime(
+                                    self.dataframes['movimientos'][date_col], errors='coerce')
+                        
+                        logger.info(f"Cargado archivo de movimientos: {len(self.dataframes['movimientos'])} filas")
+                        logger.info(f"Columnas en movimientos: {self.dataframes['movimientos'].columns.tolist()}")
+                        break
             
             # Verificar si se cargaron datos
             if any(not df.empty for df in self.dataframes.values()):
+                # Procesar columnas de anomalías en movimientos
+                if 'movimientos' in self.dataframes and not self.dataframes['movimientos'].empty:
+                    # Asegurar que la columna Anomalía es de tipo booleano
+                    if 'Anomalía' in self.dataframes['movimientos'].columns:
+                        # Convertir a booleano si es string
+                        if self.dataframes['movimientos']['Anomalía'].dtype == 'object':
+                            self.dataframes['movimientos']['Anomalía'] = (
+                                self.dataframes['movimientos']['Anomalía']
+                                .astype(str)
+                                .str.lower()
+                                .isin(['true', '1', 'true'])
+                            )
+                        # Si es numérico, convertir a booleano
+                        elif self.dataframes['movimientos']['Anomalía'].dtype in ['int64', 'float64']:
+                            self.dataframes['movimientos']['Anomalía'] = self.dataframes['movimientos']['Anomalía'].astype(bool)
+                        
+                        logger.info(f"Columna Anomalía procesada: {self.dataframes['movimientos']['Anomalía'].sum()} anomalías detectadas")
+                    else:
+                        # Si no existe la columna Anomalía pero tenemos Duración y umbral, crearla
+                        if 'Duración (s)' in self.dataframes['movimientos'].columns and 'umbral_superior' in self.dataframes['movimientos'].columns:
+                            self.dataframes['movimientos']['Anomalía'] = (
+                                self.dataframes['movimientos']['Duración (s)'] > 
+                                self.dataframes['movimientos']['umbral_superior']
+                            )
+                            logger.info(f"Columna Anomalía creada basada en umbrales: {self.dataframes['movimientos']['Anomalía'].sum()} anomalías")
+                        else:
+                            logger.warning("No se pudo encontrar o crear columna Anomalía en movimientos")
+                
                 # Generar los insights iniciales
                 self.insights = self.generate_insights()
                 logger.info(f"Insights generados para {self.line} - {self.analysis_type}")
-            
-            logger.info(f"Datos cargados exitosamente para {self.line} - {self.analysis_type}")
-            return True
-            
+                
+                # Mostrar resumen de datos cargados
+                for name, df in self.dataframes.items():
+                    if df is not None and not df.empty:
+                        logger.info(f"DataFrame '{name}': {len(df)} filas, {len(df.columns)} columnas")
+                        if name == 'movimientos' and 'Anomalía' in df.columns:
+                            logger.info(f"Anomalías en '{name}': {df['Anomalía'].sum()}")
+                
+                return True
+            else:
+                logger.warning("No se encontraron datos en los archivos cargados")
+                return False
+                
         except Exception as e:
             logger.error(f"Error al cargar los datos: {str(e)}")
+            # Informar del error usando traceback para más detalle
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def generate_insights(self, filtered_dataframes=None):
@@ -1867,82 +1937,55 @@ class DashboardGenerator:
     
     def create_data_table(self):
         """Crear tabla de datos con detalle de motivos y resaltado de anomalías"""
-        if self.analysis_type == "CDV":
-            if 'fallos_ocupacion' in self.dataframes and not self.dataframes['fallos_ocupacion'].empty:
-                df = self.dataframes['fallos_ocupacion'].copy()
-                
-                # Seleccionar columnas relevantes
-                if 'Fecha Hora' in df.columns and 'Equipo' in df.columns and 'Estacion' in df.columns:
-                    df = df[['Fecha Hora', 'Equipo', 'Estacion', 'Diff.Time_+1_row']]
-                    
-                    # Formatear para mostrar
-                    df['Fecha Hora'] = df['Fecha Hora'].dt.strftime('%d-%m-%Y %H:%M:%S')
-                    df['Diff.Time_+1_row'] = df['Diff.Time_+1_row'].astype(str)
-                    
-                    return html.Table(
-                        # Encabezado
-                        [html.Tr([html.Th(col) for col in df.columns])] +
-                        # Cuerpo
-                        [html.Tr([html.Td(df.iloc[i][col]) for col in df.columns]) for i in range(min(50, len(df)))],
-                        className='table table-striped table-hover'
-                    )
-                    
-            elif self.analysis_type == "ADV":
-                # Primero intentamos mostrar las discordancias
-                if 'discordancias' in self.dataframes and not self.dataframes['discordancias'].empty:
-                    df = self.dataframes['discordancias'].copy()
-                    
-                    # Añadir columna de motivo
-                    df['Motivo'] = "No especificado"
-                    
-                    # Determinar motivo según los campos disponibles
-                    if 'Estado Izquierda' in df.columns and 'Estado Derecha' in df.columns:
-                        # Caso 1: Ambos estados en 1 (discordancia clásica)
-                        df.loc[(df['Estado Izquierda'] == 1) & (df['Estado Derecha'] == 1), 'Motivo'] = "Ambos lados activos"
-                        
-                        # Caso 2: Transición directa sin pasar por movimiento
-                        df.loc[df['Tipo'] == 'Transición directa', 'Motivo'] = "Transición directa sin movimiento"
-                    
-                    if 'Duración (s)' in df.columns and 'umbral_superior' in df.columns:
-                        # Caso 3: Tiempo de movimiento excesivo
-                        df.loc[df['Duración (s)'] > df['umbral_superior'], 'Motivo'] = f"Tiempo de movimiento excesivo ({df['Duración (s)']:.2f}s)"
+        try:
+            if self.analysis_type == "CDV":
+                if 'fallos_ocupacion' in self.dataframes and not self.dataframes['fallos_ocupacion'].empty:
+                    df = self.dataframes['fallos_ocupacion'].copy()
                     
                     # Seleccionar columnas relevantes
-                    columns_to_show = ['Fecha Hora', 'Equipo Estacion', 'Motivo', 'Linea']
-                    columns_present = [col for col in columns_to_show if col in df.columns]
-                    
-                    # Añadir más columnas informativas
-                    if 'Estado Izquierda' in df.columns and 'Estado Derecha' in df.columns:
-                        df['Estados'] = df['Estado Izquierda'].astype(str) + '/' + df['Estado Derecha'].astype(str)
-                        columns_present.append('Estados')
-                    
-                    if columns_present:
-                        df = df[columns_present]
+                    if 'Fecha Hora' in df.columns and 'Equipo' in df.columns and 'Estacion' in df.columns:
+                        # Asegurar que Fecha Hora es datetime
+                        df['Fecha Hora'] = pd.to_datetime(df['Fecha Hora'], errors='coerce')
                         
-                        # Formatear para mostrar si es necesario
-                        if 'Fecha Hora' in df.columns:
-                            df['Fecha Hora'] = pd.to_datetime(df['Fecha Hora']).dt.strftime('%d-%m-%Y %H:%M:%S')
+                        # Seleccionar columnas más relevantes
+                        if 'Diff.Time_+1_row' in df.columns:
+                            df = df[['Fecha Hora', 'Equipo', 'Estacion', 'Diff.Time_+1_row']]
+                            df.rename(columns={'Diff.Time_+1_row': 'Tiempo (s)'}, inplace=True)
+                        else:
+                            df = df[['Fecha Hora', 'Equipo', 'Estacion']]
+                        
+                        # Formatear para mostrar
+                        df['Fecha Hora'] = df['Fecha Hora'].dt.strftime('%d-%m-%Y %H:%M:%S')
+                        
+                        # Limitar a 50 filas para mejor rendimiento
+                        df = df.head(50)
                         
                         return html.Table(
                             # Encabezado
                             [html.Tr([html.Th(col) for col in df.columns])] +
-                            # Cuerpo con resaltado para todas las discordancias
-                            [html.Tr([
-                                html.Td(df.iloc[i][col], style={'color': 'red', 'fontWeight': 'bold'})
-                                for col in df.columns
-                            ]) for i in range(min(50, len(df)))],
+                            # Cuerpo
+                            [html.Tr([html.Td(df.iloc[i][col]) for col in df.columns]) for i in range(len(df))],
                             className='table table-striped table-hover'
                         )
-                
-                # Si no hay discordancias o están vacías, mostramos movimientos
+                        
+            elif self.analysis_type == "ADV":
+                # Primero intentamos mostrar movimientos anómalos si existen
                 if 'movimientos' in self.dataframes and not self.dataframes['movimientos'].empty:
                     df = self.dataframes['movimientos'].copy()
+                    
+                    # Verificar si existe la columna Anomalía
+                    has_anomaly_column = 'Anomalía' in df.columns
                     
                     # Añadir columna de motivo
                     df['Motivo'] = "Movimiento normal"
                     
-                    # Marcar movimientos anómalos
-                    if 'Anomalía' in df.columns:
+                    # Marcar movimientos anómalos si la columna existe
+                    if has_anomaly_column:
+                        # Convertir a booleano si es necesario
+                        if df['Anomalía'].dtype == 'object':
+                            df['Anomalía'] = df['Anomalía'].astype(str).str.lower() == 'true'
+                        
+                        # Marcar movimientos anómalos
                         df.loc[df['Anomalía'] == True, 'Motivo'] = "Tiempo de movimiento anómalo"
                         
                         # Detallar el tipo de anomalía si es posible
@@ -1951,51 +1994,113 @@ class DashboardGenerator:
                             df.loc[(df['Anomalía_Media'] == True) & (df['Anomalía_Mediana'] == False), 'Motivo'] = "Anomalía por media"
                             df.loc[(df['Anomalía_Media'] == False) & (df['Anomalía_Mediana'] == True), 'Motivo'] = "Anomalía por mediana"
                     
-                    # Mostrar primero las anomalías
-                    df_anomalias = df[df['Anomalía'] == True].copy() if 'Anomalía' in df.columns else pd.DataFrame()
-                    df_normales = df[~df['Anomalía']].copy() if 'Anomalía' in df.columns else df.copy()
+                    # Extraer la estación correctamente de la columna Equipo
+                    if 'Equipo' in df.columns:
+                        # Extraer la estación correctamente (últimas 2 letras después del último espacio)
+                        def extract_station_code(equipo):
+                            parts = str(equipo).split()
+                            # Si hay partes suficientes, tomar la última
+                            if len(parts) > 1:
+                                return parts[-1]
+                            # Si la aguja tiene formato Kag XX/YY pero sin estación explícita
+                            elif "/" in equipo:
+                                return "XX"  # Código genérico
+                            return "NA"  # Valor por defecto
+                            
+                        # Aplicar la extracción a cada fila
+                        if 'Estación' in df.columns:
+                            # Reemplazar los valores actuales
+                            df['Estación'] = df['Equipo'].apply(extract_station_code)
+                        else:
+                            # Crear nueva columna
+                            df['Estación'] = df['Equipo'].apply(extract_station_code)
                     
-                    # Si hay muchos datos normales, tomar solo una muestra
-                    if len(df_normales) > 20:
-                        df_normales = df_normales.sample(20)
+                    # Si tenemos información sobre umbral, mostrar también movimientos cercanos al umbral
+                    if 'Duración (s)' in df.columns and 'umbral_superior' in df.columns:
+                        # Movimientos cercanos al umbral (80-100% del umbral)
+                        df.loc[(df['Duración (s)'] >= 0.8 * df['umbral_superior']) & 
+                            (df['Duración (s)'] < df['umbral_superior']) & 
+                            (df['Motivo'] == "Movimiento normal"), 'Motivo'] = "Cercano al umbral"
                     
-                    # Combinar anomalías + muestra de normales
-                    if not df_anomalias.empty:
-                        df = pd.concat([df_anomalias, df_normales])
-                    else:
-                        df = df_normales.head(50)  # Limitar a 50 registros si no hay anomalías
+                    # Preparar datos para ordenamiento (anomalías primero)
+                    df_final = df.copy()
                     
-                    # Ordenar primero por anomalía y luego por duración descendente
-                    if 'Anomalía' in df.columns and 'Duración (s)' in df.columns:
-                        df = df.sort_values(['Anomalía', 'Duración (s)'], ascending=[False, False])
-                    elif 'Duración (s)' in df.columns:
-                        df = df.sort_values('Duración (s)', ascending=False)
+                    # Ordenar primero por si es anomalía y luego por duración
+                    if 'Anomalía' in df_final.columns and 'Duración (s)' in df_final.columns:
+                        df_final = df_final.sort_values(['Anomalía', 'Duración (s)'], ascending=[False, False])
+                    elif 'Duración (s)' in df_final.columns:
+                        df_final = df_final.sort_values('Duración (s)', ascending=False)
+                    elif 'Motivo' in df_final.columns:
+                        # Ordenar poniendo los movimientos anormales primero
+                        df_final['es_anormal'] = ~df_final['Motivo'].isin(["Movimiento normal"])
+                        df_final = df_final.sort_values('es_anormal', ascending=False)
                     
-                    # Seleccionar columnas relevantes
-                    columns_to_show = ['Fecha', 'Hora Inicio', 'Hora Fin', 'Duración (s)', 'Equipo', 'Motivo', 'Linea']
-                    columns_present = [col for col in columns_to_show if col in df.columns]
+                    # Seleccionar columnas relevantes para mostrar
+                    columns_to_show = ['Fecha', 'Hora Inicio', 'Hora Fin', 'Duración (s)', 'Equipo', 'Motivo', 'Estación', 'Linea']
+                    columns_present = [col for col in columns_to_show if col in df_final.columns]
                     
                     if columns_present:
-                        df = df[columns_present]
+                        df_final = df_final[columns_present]
                         
-                        return html.Table(
-                            # Encabezado
-                            [html.Tr([html.Th(col) for col in df.columns])] +
-                            # Cuerpo con estilo condicional para resaltar anomalías
-                            [html.Tr([
-                                html.Td(
-                                    df.iloc[i][col], 
-                                    style={'color': 'red', 'fontWeight': 'bold'} 
-                                    if ('Motivo' in df.columns and 'anómal' in str(df.iloc[i]['Motivo'])) 
-                                    else {}
-                                )
-                                for col in df.columns
-                            ]) for i in range(min(50, len(df)))],
-                            className='table table-striped table-hover'
+                        # Usar dash_table.DataTable para paginación
+                        from dash import dash_table
+                        
+                        # Configurar estilos condicionales
+                    # Configurar estilos condicionales para resaltar anomalías
+                        conditional_style = [
+                            {
+                                'if': {'filter_query': '{Motivo} contains "media y mediana"'},
+                                'backgroundColor': 'rgba(255,200,200,0.3)',
+                                'color': 'red',
+                                'fontWeight': 'bold'
+                            },
+                            {
+                                'if': {'filter_query': '{Motivo} contains "media" && {Motivo} not contains "mediana"'},
+                                'backgroundColor': 'rgba(255,220,220,0.3)',
+                                'color': 'red'
+                            },
+                            {
+                                'if': {'filter_query': '{Motivo} contains "mediana" && {Motivo} not contains "media"'},
+                                'backgroundColor': 'rgba(255,220,220,0.3)',
+                                'color': 'red'
+                            },
+                            {
+                                'if': {'column_id': 'Duración (s)', 'filter_query': '{Duración (s)} > 10'},
+                                'color': 'red',
+                                'fontWeight': 'bold'
+                            }
+                        ]
+                        
+                        # Crear tabla con paginación
+                        return dash_table.DataTable(
+                            id='data-table',
+                            columns=[{"name": col, "id": col} for col in df_final.columns],
+                            data=df_final.to_dict('records'),
+                            style_table={'overflowX': 'auto'},
+                            style_cell={
+                                'textAlign': 'left',
+                                'padding': '5px',
+                                'backgroundColor': 'white'
+                            },
+                            style_header={
+                                'backgroundColor': '#f8f9fa',
+                                'fontWeight': 'bold'
+                            },
+                            style_data_conditional=conditional_style,
+                            page_size=15,  # Mostrar 15 filas por página
+                            page_action='native',
+                            sort_action='native',
+                            filter_action='native'
                         )
             
-            # Tabla vacía en caso de no tener datos
-            return html.Div("No hay datos disponibles para mostrar en la tabla.")
+            # Si llegamos aquí es porque no pudimos crear la tabla
+            return html.Div("No hay datos disponibles para mostrar en la tabla.", className="alert alert-warning")
+        
+        except Exception as e:
+            import traceback
+            print(f"Error al crear tabla de datos: {str(e)}")
+            print(traceback.format_exc())
+            return html.Div(f"Error al mostrar datos: {str(e)}", className="alert alert-danger")
     
     def get_min_date(self):
         """Obtener la fecha mínima de los datos"""
@@ -2057,187 +2162,143 @@ class DashboardGenerator:
         if not self.app:
             return
         
-        # Añadir un callback para debugging
-        @self.app.callback(
-            Output('apply-filters-button', 'style'),
-            [Input('apply-filters-button', 'n_clicks')]
-        )
-        def debug_callback(n_clicks):
-            if n_clicks:
-                print(f"Botón de filtros presionado: {n_clicks} veces")
-            return {'backgroundColor': self.colors['secondary'],
-                    'color': 'white',
-                    'fontWeight': 'bold',
-                    'padding': '10px 20px',
-                    'border': 'none',
-                    'borderRadius': '5px',
-                    'cursor': 'pointer'}
-            
+        # Callback para el botón de filtros
         @self.app.callback(
             [Output('time-trend-graph', 'figure'),
             Output('equipment-distribution', 'figure'),
             Output('hourly-distribution', 'figure'),
             Output('heatmap', 'figure'),
-            Output('timeline-graph', 'figure'),
-            Output('alertas-list', 'children'),
-            Output('recomendaciones-predictivas-list', 'children'),
-            Output('recomendaciones-preventivas-list', 'children'),
-            Output('patrones-list', 'children')],
+            Output('timeline-graph', 'figure')],
             [Input('apply-filters-button', 'n_clicks')],
             [State('date-range', 'start_date'),
             State('date-range', 'end_date'),
             State('equipment-filter', 'value'),
             State('visualization-type', 'value')]
         )
-        
-        # Definir la función del callback
-        def update_graphs_and_recommendations(n_clicks, start_date, end_date, selected_equipments, viz_type):
-            
-            # Debugging
-            print(f"Callback principal activado. n_clicks: {n_clicks}")
+        def update_graphs(n_clicks, start_date, end_date, selected_equipments, viz_type):
+            """Callback para actualizar los gráficos cuando se aplican filtros"""
+            print(f"Callback de filtros activado. n_clicks: {n_clicks}")
             print(f"Fechas: {start_date} a {end_date}")
             print(f"Equipos seleccionados: {selected_equipments}")
             print(f"Tipo visualización: {viz_type}")
             
-            
-            # No actualizar si no se ha presionado el botón
+            # Si es la primera carga (no se ha hecho click) o no hay filtros seleccionados
             if n_clicks is None:
-                # Retornar valores iniciales para TODOS los gráficos
                 return [
-                    self.create_time_trend_figure(), 
+                    self.create_time_trend_figure(),
                     self.create_equipment_distribution_figure(),
                     self.create_hourly_distribution_figure(),
                     self.create_heatmap_figure(),
-                    self.create_timeline_figure(),  # Añadir el nuevo gráfico
-                    # Lista de elementos para las alertas
-                    [html.Li(alerta, className='alert alert-danger') for alerta in self.insights.get('alertas_urgentes', [])] 
-                    if self.insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
-                    # Lista para recomendaciones predictivas
-                    [html.Li(rec, className='mb-2') for rec in self.insights.get('recomendaciones_predictivas', [])],
-                    # Lista para recomendaciones preventivas
-                    [html.Li(rec, className='mb-2') for rec in self.insights.get('recomendaciones_preventivas', [])],
-                    # Lista para patrones detectados
-                    [html.Li(pat) for pat in self.insights.get('patrones_detectados', [])]
-                    if self.insights.get('patrones_detectados', []) else [html.P("No se detectaron patrones significativos")]
+                    self.create_timeline_figure()
                 ]
-                
-            try:
-                # Preparar fecha de inicio y fin
-                start_date = pd.to_datetime(start_date)
-                end_date = pd.to_datetime(end_date)
-                
-                # Crear copias filtradas de los dataframes originales
-                filtered_dfs = {}
-                
-                # Aplicar filtros a todos los dataframes
-                for key, df in self.dataframes.items():
-                    if df is not None and not df.empty:
-                        filtered_dfs[key] = df.copy()
-                        
-                        # Filtrar por fecha si la columna adecuada existe
-                        if 'Fecha Hora' in df.columns and start_date and end_date:
-                            # Asegurar que Fecha Hora es datetime
-                            filtered_dfs[key]['Fecha Hora'] = pd.to_datetime(filtered_dfs[key]['Fecha Hora'])
-                            filtered_dfs[key] = filtered_dfs[key][
-                                (filtered_dfs[key]['Fecha Hora'] >= start_date) & 
-                                (filtered_dfs[key]['Fecha Hora'] <= end_date)
-                            ]
-                        elif 'Fecha' in df.columns and start_date and end_date:
-                            # Asegurar que Fecha es datetime
-                            filtered_dfs[key]['Fecha'] = pd.to_datetime(filtered_dfs[key]['Fecha'])
-                            filtered_dfs[key] = filtered_dfs[key][
-                                (filtered_dfs[key]['Fecha'] >= pd.to_datetime(start_date)) & 
-                                (filtered_dfs[key]['Fecha'] <= pd.to_datetime(end_date))
-                            ]
-                        
-                        # Filtrar por equipamiento según el tipo de análisis
-                        if selected_equipments and len(selected_equipments) > 0:
-                            if 'Equipo' in df.columns:
-                                filtered_dfs[key] = filtered_dfs[key][
-                                    filtered_dfs[key]['Equipo'].isin(selected_equipments)
-                                ]
-                            elif 'Equipo Estacion' in df.columns and self.analysis_type == "ADV":
-                                filtered_dfs[key] = filtered_dfs[key][
-                                    filtered_dfs[key]['Equipo Estacion'].isin(selected_equipments)
-                                ]
-                
-                # Verificar si hay datos después del filtrado
-                has_data = any(not df.empty for df in filtered_dfs.values())
-                
-                if has_data:
-                    # Generar insights actualizados basados en datos filtrados
-                    updated_insights = self.generate_insights(filtered_dfs)
-                    
-                    # Retornar todos los componentes actualizados - asegurarse de incluir el timeline-graph
-                    return [
-                        self.create_time_trend_figure(dataframes=filtered_dfs),
-                        self.create_equipment_distribution_figure(dataframes=filtered_dfs),
-                        self.create_hourly_distribution_figure(dataframes=filtered_dfs, viz_type=viz_type),
-                        self.create_heatmap_figure(dataframes=filtered_dfs, viz_type=viz_type),
-                        self.create_timeline_figure(dataframes=filtered_dfs),  # Importante: incluir este gráfico
-                        [html.Li(alerta, className='alert alert-danger') for alerta in updated_insights.get('alertas_urgentes', [])]
-                        if updated_insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
-                        [html.Li(rec, className='mb-2') for rec in updated_insights.get('recomendaciones_predictivas', [])],
-                        [html.Li(rec, className='mb-2') for rec in updated_insights.get('recomendaciones_preventivas', [])],
-                        [html.Li(pat) for pat in updated_insights.get('patrones_detectados', [])]
-                        if updated_insights.get('patrones_detectados', []) else [html.P("No se detectaron patrones significativos en los datos filtrados")]
-                    ]
-                
-                else:
-                    # Mensaje para indicar que no hay datos para el filtro seleccionado
-                    empty_fig = go.Figure()
-                    empty_fig.update_layout(
-                        title="No hay datos disponibles para los filtros seleccionados",
-                        xaxis=dict(title=""),
-                        yaxis=dict(title=""),
-                        annotations=[dict(
-                            text="Intente con un rango de fechas o equipos diferente",
-                            xref="paper", yref="paper",
-                            x=0.5, y=0.5, showarrow=False
-                        )]
-                    )
-                    
-                    # Mensaje para las recomendaciones y alertas
-                    no_data_msg = [html.P("No hay datos para los filtros seleccionados", className='text-warning')]
-                    
-                    return [empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, no_data_msg, no_data_msg, no_data_msg, no_data_msg]
-                    
-            except Exception as e:
-                logger.error(f"Error en callback de actualización: {str(e)}")
-                # Devolver componentes con mensaje de error
-                empty_fig = go.Figure()
-                empty_fig.update_layout(
-                    title="Error al actualizar datos",
-                    xaxis=dict(title=""),
-                    yaxis=dict(title=""),
-                    annotations=[dict(
-                        text=f"Error: {str(e)}",
-                        xref="paper", yref="paper",
-                        x=0.5, y=0.5, showarrow=False
-                    )]
-                )
-                
-                error_msg = [html.P(f"Error al procesar los datos: {str(e)}", className='text-danger')]
-                
-                return [empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, error_msg, error_msg, error_msg, error_msg]
+            
+            # Aplicar filtros a los dataframes
+            filtered_dfs = self.apply_filters(start_date, end_date, selected_equipments)
+            
+            # Retornar gráficos actualizados
+            return [
+                self.create_time_trend_figure(dataframes=filtered_dfs),
+                self.create_equipment_distribution_figure(dataframes=filtered_dfs),
+                self.create_hourly_distribution_figure(dataframes=filtered_dfs, viz_type=viz_type),
+                self.create_heatmap_figure(dataframes=filtered_dfs, viz_type=viz_type),
+                self.create_timeline_figure(dataframes=filtered_dfs)
+            ]
         
-        # Aplicar el decorador al callback
-        self.app.callback(
-            [Output('time-trend-graph', 'figure'),
-            Output('equipment-distribution', 'figure'),
-            Output('hourly-distribution', 'figure'),
-            Output('heatmap', 'figure'),
-            Output('timeline-graph', 'figure'),  # Añadir este output
-            Output('alertas-list', 'children'),
+        # Callback separado para recomendaciones y patrones
+        @self.app.callback(
+            [Output('alertas-list', 'children'),
             Output('recomendaciones-predictivas-list', 'children'),
             Output('recomendaciones-preventivas-list', 'children'),
             Output('patrones-list', 'children')],
             [Input('apply-filters-button', 'n_clicks')],
             [State('date-range', 'start_date'),
             State('date-range', 'end_date'),
-            State('equipment-filter', 'value'),
-            State('visualization-type', 'value')]
-        )(update_graphs_and_recommendations)
+            State('equipment-filter', 'value')]
+        )
+        def update_recommendations(n_clicks, start_date, end_date, selected_equipments):
+            """Callback para actualizar recomendaciones cuando se aplican filtros"""
+            # Si es la primera carga
+            if n_clicks is None:
+                return [
+                    [html.Li(alerta, className='alert alert-danger') for alerta in self.insights.get('alertas_urgentes', [])] 
+                    if self.insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
+                    [html.Li(rec, className='mb-2') for rec in self.insights.get('recomendaciones_predictivas', [])],
+                    [html.Li(rec, className='mb-2') for rec in self.insights.get('recomendaciones_preventivas', [])],
+                    [html.Li(pat) for pat in self.insights.get('patrones_detectados', [])]
+                    if self.insights.get('patrones_detectados', []) else [html.P("No se detectaron patrones significativos")]
+                ]
+            
+            # Aplicar filtros a los dataframes
+            filtered_dfs = self.apply_filters(start_date, end_date, selected_equipments)
+            
+            # Generar insights basados en datos filtrados
+            updated_insights = self.generate_insights(filtered_dfs)
+            
+            # Retornar recomendaciones actualizadas
+            return [
+                [html.Li(alerta, className='alert alert-danger') for alerta in updated_insights.get('alertas_urgentes', [])]
+                if updated_insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
+                [html.Li(rec, className='mb-2') for rec in updated_insights.get('recomendaciones_predictivas', [])],
+                [html.Li(rec, className='mb-2') for rec in updated_insights.get('recomendaciones_preventivas', [])],
+                [html.Li(pat) for pat in updated_insights.get('patrones_detectados', [])]
+                if updated_insights.get('patrones_detectados', []) else [html.P("No se detectaron patrones significativos en los datos filtrados")]
+            ]
+        
+        # Método helper para aplicar filtros
+        def apply_filters(self, start_date, end_date, selected_equipments):
+            """Aplicar filtros a todos los dataframes"""
+            filtered_dfs = {}
+            
+            # Convertir fechas a datetime
+            if start_date:
+                start_date = pd.to_datetime(start_date)
+            if end_date:
+                end_date = pd.to_datetime(end_date)
+            
+            print(f"Aplicando filtros a dataframes: {list(self.dataframes.keys())}")
+            
+            for key, df in self.dataframes.items():
+                if df is not None and not df.empty:
+                    filtered_dfs[key] = df.copy()
+                    before_rows = len(filtered_dfs[key])
+                    
+                    # Filtrar por fecha
+                    if start_date and end_date:
+                        if 'Fecha Hora' in df.columns:
+                            # Asegurar que Fecha Hora es datetime
+                            filtered_dfs[key]['Fecha Hora'] = pd.to_datetime(filtered_dfs[key]['Fecha Hora'], errors='coerce')
+                            filtered_dfs[key] = filtered_dfs[key][
+                                (filtered_dfs[key]['Fecha Hora'] >= start_date) & 
+                                (filtered_dfs[key]['Fecha Hora'] <= end_date)
+                            ]
+                        elif 'Fecha' in df.columns:
+                            # Asegurar que Fecha es datetime
+                            filtered_dfs[key]['Fecha'] = pd.to_datetime(filtered_dfs[key]['Fecha'], errors='coerce')
+                            filtered_dfs[key] = filtered_dfs[key][
+                                (filtered_dfs[key]['Fecha'] >= start_date) & 
+                                (filtered_dfs[key]['Fecha'] <= end_date)
+                            ]
+                    
+                    after_date_filter = len(filtered_dfs[key])
+                    print(f"DataFrame {key}: {before_rows} filas → {after_date_filter} filas después de filtrar por fecha")
+                    
+                    # Filtrar por equipamiento
+                    if selected_equipments and len(selected_equipments) > 0:
+                        before_equip = len(filtered_dfs[key])
+                        
+                        if 'Equipo' in df.columns:
+                            filtered_dfs[key] = filtered_dfs[key][
+                                filtered_dfs[key]['Equipo'].isin(selected_equipments)
+                            ]
+                        elif 'Equipo Estacion' in df.columns:
+                            filtered_dfs[key] = filtered_dfs[key][
+                                filtered_dfs[key]['Equipo Estacion'].isin(selected_equipments)
+                            ]
+                        
+                        after_equip = len(filtered_dfs[key])
+                        print(f"DataFrame {key}: {before_equip} filas → {after_equip} filas después de filtrar por equipos")
+            
+            return filtered_dfs
     
     def run_dashboard(self):
         """Ejecutar el dashboard web"""
