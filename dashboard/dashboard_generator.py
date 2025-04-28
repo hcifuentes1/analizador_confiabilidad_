@@ -21,6 +21,7 @@ from sklearn.linear_model import LinearRegression
 from statsmodels.tsa.arima.model import ARIMA
 from dash import dash_table, html  # Asegurarse de que dash_table esté importado
 
+
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -224,6 +225,652 @@ class DashboardGenerator:
             import traceback
             logger.error(traceback.format_exc())
             return False
+        
+##############################################################################################################
+
+    def create_forecast_trend_graph(self, dataframes=None, equipment_id=None, days_ahead=30):
+        """Crear gráfico con proyección de tendencia futura para un equipo"""
+        # Usar dataframes filtrados si se proporcionan
+        dfs = dataframes if dataframes else self.dataframes
+        
+        # Seleccionar datos relevantes según tipo de análisis
+        if self.analysis_type == "CDV" and 'fallos_ocupacion' in dfs:
+            df = dfs['fallos_ocupacion'].copy()
+            date_col = 'Fecha Hora'
+            equipment_col = 'Equipo'
+        elif self.analysis_type == "ADV" and 'movimientos' in dfs:
+            df = dfs['movimientos'].copy()
+            date_col = 'Fecha'
+            equipment_col = 'Equipo'
+        else:
+            # Si no hay datos adecuados, devolver gráfico vacío
+            fig = go.Figure()
+            fig.update_layout(
+                title="No hay datos suficientes para generar pronósticos",
+                xaxis=dict(title="Fecha"),
+                yaxis=dict(title="Valor"),
+                plot_bgcolor='white'
+            )
+            return fig
+        
+        # Si se especificó un equipo, filtrar para ese equipo
+        if equipment_id and equipment_id in df[equipment_col].unique():
+            df = df[df[equipment_col] == equipment_id]
+        else:
+            # Si no hay equipo específico, tomar el de mayor frecuencia
+            top_equipment = df[equipment_col].value_counts().idxmax()
+            df = df[df[equipment_col] == top_equipment]
+            equipment_id = top_equipment
+        
+        # Preparar datos para análisis de tendencia
+        df['date'] = pd.to_datetime(df[date_col]).dt.date
+        counts_by_day = df.groupby('date').size().reset_index(name='count')
+        counts_by_day['date'] = pd.to_datetime(counts_by_day['date'])
+        
+        # Crear serie temporal completa
+        date_range = pd.date_range(
+            start=counts_by_day['date'].min(), 
+            end=counts_by_day['date'].max()
+        )
+        
+        time_series = pd.DataFrame({'date': date_range})
+        time_series = time_series.merge(counts_by_day, on='date', how='left')
+        time_series['count'] = time_series['count'].fillna(0)
+        
+        # Preparar datos para el modelo
+        X = np.array(range(len(time_series))).reshape(-1, 1)
+        y = time_series['count'].values
+        
+        # Ajustar modelo de regresión
+        model = LinearRegression()
+        model.fit(X, y)
+        
+        # Calcular tendencia futura
+        future_days = days_ahead
+        X_future = np.array(range(len(time_series), len(time_series) + future_days)).reshape(-1, 1)
+        future_dates = [time_series['date'].max() + timedelta(days=i+1) for i in range(future_days)]
+        forecast = model.predict(X_future)
+        forecast = np.maximum(forecast, 0)  # No permitir valores negativos
+        
+        # Crear figura
+        fig = go.Figure()
+        
+        # Datos históricos
+        fig.add_trace(go.Scatter(
+            x=time_series['date'],
+            y=time_series['count'],
+            mode='lines+markers',
+            name='Datos históricos',
+            line=dict(color='blue')
+        ))
+        
+        # Línea de tendencia pasada
+        fig.add_trace(go.Scatter(
+            x=time_series['date'],
+            y=model.predict(X),
+            mode='lines',
+            name='Tendencia histórica',
+            line=dict(color='green', dash='dash')
+        ))
+        
+        # Proyección futura
+        fig.add_trace(go.Scatter(
+            x=future_dates,
+            y=forecast,
+            mode='lines',
+            name='Proyección futura',
+            line=dict(color='red', dash='dash')
+        ))
+        
+        # Añadir región sombreada para la proyección
+        fig.add_vrect(
+            x0=time_series['date'].max(),
+            x1=future_dates[-1],
+            fillcolor="rgba(255, 0, 0, 0.1)",
+            layer="below",
+            line_width=0,
+        )
+        
+        # Configuración del gráfico
+        fig.update_layout(
+            title=f"Análisis Predictivo - {equipment_id}",
+            xaxis_title="Fecha",
+            yaxis_title="Frecuencia de Eventos",
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font_color=self.colors['text'],
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        # Añadir anotación con métricas predictivas
+        slope = model.coef_[0]
+        slope_percentage = slope / time_series['count'].mean() * 100 if time_series['count'].mean() > 0 else 0
+        
+        status = "Estable"
+        color = "green"
+        if slope_percentage > 10:
+            status = "Degradación Severa"
+            color = "red"
+        elif slope_percentage > 5:
+            status = "Degradación Moderada"
+            color = "orange"
+        elif slope_percentage > 2:
+            status = "Degradación Leve"
+            color = "blue"
+        
+        fig.add_annotation(
+            x=0.02,
+            y=0.98,
+            xref="paper",
+            yref="paper",
+            text=f"Estado: <b>{status}</b><br>Tasa de cambio: {slope_percentage:.2f}% por día<br>Eventos proyectados (30 días): {round(forecast.sum())}",
+            showarrow=False,
+            font=dict(color=color),
+            align="left",
+            bgcolor="white",
+            bordercolor=color,
+            borderwidth=2,
+            borderpad=4
+        )
+        
+        return fig
+    
+    
+    def create_degradation_risk_matrix(self, dataframes=None):
+        """Crear matriz de riesgo de degradación para equipos"""
+        # Usar dataframes filtrados si se proporcionan
+        dfs = dataframes if dataframes else self.dataframes
+        
+        # Preparar datos según tipo de análisis
+        if self.analysis_type == "CDV":
+            if 'fallos_ocupacion' not in dfs or dfs['fallos_ocupacion'].empty:
+                return self._create_empty_figure("No hay datos suficientes para análisis de riesgo")
+            
+            df = dfs['fallos_ocupacion'].copy()
+            date_col = 'Fecha Hora'
+            equipment_col = 'Equipo'
+        
+        elif self.analysis_type == "ADV":
+            if 'movimientos' not in dfs or dfs['movimientos'].empty:
+                return self._create_empty_figure("No hay datos suficientes para análisis de riesgo")
+            
+            df = dfs['movimientos'].copy()
+            date_col = 'Fecha'
+            equipment_col = 'Equipo'
+        
+        else:
+            return self._create_empty_figure("Tipo de análisis no soportado para matriz de riesgo")
+        
+        # Convertir fechas y preparar datos
+        df['date'] = pd.to_datetime(df[date_col]).dt.date
+        
+        # Calcular métricas por equipo
+        equipment_metrics = []
+        
+        for equipment in df[equipment_col].unique():
+            equip_df = df[df[equipment_col] == equipment]
+            
+            # Agrupar por fecha
+            daily_counts = equip_df.groupby('date').size().reset_index(name='count')
+            daily_counts['date'] = pd.to_datetime(daily_counts['date'])
+            
+            if len(daily_counts) < 5:  # Necesitamos suficientes datos para análisis
+                continue
+                
+            # Calcular tendencia
+            X = np.array(range(len(daily_counts))).reshape(-1, 1)
+            y = daily_counts['count'].values
+            
+            model = LinearRegression()
+            model.fit(X, y)
+            
+            slope = model.coef_[0]
+            
+            # Calcular frecuencia promedio reciente (últimos 14 días)
+            recent_cutoff = datetime.now().date() - timedelta(days=14)
+            recent_counts = daily_counts[daily_counts['date'] >= pd.Timestamp(recent_cutoff)]
+            recent_avg = recent_counts['count'].mean() if not recent_counts.empty else 0
+            
+            # Calcular volatilidad (desviación estándar)
+            volatility = daily_counts['count'].std()
+            
+            # Normalizar pendiente como porcentaje
+            baseline = daily_counts['count'].mean() if daily_counts['count'].mean() > 0 else 1
+            slope_pct = slope / baseline * 100
+            
+            # Calcular "probabilidad" (basada en frecuencia reciente)
+            prob_factor = min(1.0, recent_avg / 5.0) if recent_avg > 0 else 0
+            
+            # Calcular "impacto" (basado en tendencia y volatilidad)
+            impact_factor = min(1.0, (abs(slope_pct) / 10.0 + volatility / 3.0) / 2.0)
+            
+            # Calcular puntuación de riesgo (0-100)
+            risk_score = 100 * prob_factor * impact_factor
+            
+            # Determinar categoría de riesgo
+            if risk_score > 66:
+                risk_category = "Alto"
+                color = "red"
+            elif risk_score > 33:
+                risk_category = "Medio"
+                color = "orange"
+            else:
+                risk_category = "Bajo"
+                color = "green"
+            
+            equipment_metrics.append({
+                'Equipo': equipment,
+                'Frecuencia': recent_avg,
+                'Tendencia': slope_pct,
+                'Volatilidad': volatility,
+                'Riesgo': risk_score,
+                'Categoría': risk_category,
+                'Color': color
+            })
+        
+        # Si no hay métricas calculadas, mostrar figura vacía
+        if not equipment_metrics:
+            return self._create_empty_figure("No hay suficientes datos para análisis de riesgo")
+        
+        # Crear dataframe con métricas
+        metrics_df = pd.DataFrame(equipment_metrics)
+        
+        # Ordenar por riesgo descendente
+        metrics_df = metrics_df.sort_values('Riesgo', ascending=False)
+        
+        # Crear figura de matriz de riesgo
+        fig = go.Figure()
+        
+        # Añadir puntos para cada equipo
+        fig.add_trace(go.Scatter(
+            x=metrics_df['Frecuencia'],
+            y=metrics_df['Tendencia'],
+            mode='markers',
+            marker=dict(
+                size=metrics_df['Volatilidad'] * 3 + 8,  # Tamaño basado en volatilidad
+                color=metrics_df['Riesgo'],
+                colorscale='RdYlGn_r',  # Rojo para alto riesgo, verde para bajo
+                showscale=True,
+                colorbar=dict(title="Nivel de Riesgo"),
+                line=dict(width=1, color='black')
+            ),
+            text=metrics_df['Equipo'],
+            hovertemplate='<b>%{text}</b><br>' +
+                        'Frecuencia: %{x:.2f}<br>' +
+                        'Tendencia: %{y:.2f}%<br>' +
+                        'Volatilidad: %{marker.size:.2f}<br>' +
+                        'Riesgo: %{marker.color:.1f}%<br>'
+        ))
+        
+        # Añadir anotaciones para los equipos de mayor riesgo
+        for i, row in metrics_df.head(3).iterrows():
+            fig.add_annotation(
+                x=row['Frecuencia'],
+                y=row['Tendencia'],
+                text=row['Equipo'],
+                showarrow=True,
+                arrowhead=1,
+                arrowcolor=row['Color'],
+                arrowsize=1,
+                arrowwidth=2,
+                ax=20,
+                ay=-30,
+                font=dict(color=row['Color'])
+            )
+        
+        # Añadir zonas de riesgo como regiones rectangulares
+        # Zona de alto riesgo (cuadrante superior derecho)
+        fig.add_shape(
+            type="rect",
+            x0=metrics_df['Frecuencia'].max() * 0.6,
+            y0=0,
+            x1=metrics_df['Frecuencia'].max() * 1.1,
+            y1=metrics_df['Tendencia'].max() * 1.1,
+            line=dict(width=0),
+            fillcolor="rgba(255,0,0,0.1)",
+            layer="below"
+        )
+        
+        # Añadir etiqueta para zona de alto riesgo
+        fig.add_annotation(
+            x=metrics_df['Frecuencia'].max() * 0.8,
+            y=metrics_df['Tendencia'].max() * 0.8,
+            text="ZONA DE ALTO RIESGO",
+            showarrow=False,
+            font=dict(color="red", size=12)
+        )
+        
+        # Configurar layout
+        fig.update_layout(
+            title="Matriz de Riesgo de Degradación",
+            xaxis_title="Frecuencia de Eventos (últimos 14 días)",
+            yaxis_title="Tendencia de Degradación (%)",
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font_color=self.colors['text'],
+            margin=dict(l=10, r=10, t=50, b=10),
+            height=500
+        )
+        
+        return fig
+        
+    def _create_empty_figure(self, message):
+        """Crear figura vacía con mensaje informativo"""
+        fig = go.Figure()
+        fig.update_layout(
+            title=message,
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font_color=self.colors['text'],
+            annotations=[
+                dict(
+                    text=message,
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(size=14)
+                )
+            ]
+        )
+        return fig
+    
+    
+    def create_degradation_pattern_analysis(self, dataframes=None):
+        """Crear análisis de patrones de degradación con identificación de fases"""
+        try:
+            # Usar dataframes filtrados si se proporcionan
+            dfs = dataframes if dataframes else self.dataframes
+            
+            # Preparar datos según tipo de análisis
+            if self.analysis_type == "CDV":
+                if 'fallos_ocupacion' not in dfs or dfs['fallos_ocupacion'].empty:
+                    return self._create_empty_figure("No hay datos suficientes para análisis de patrones")
+                
+                df = dfs['fallos_ocupacion'].copy()
+                date_col = 'Fecha Hora'
+                equipment_col = 'Equipo'
+            
+            elif self.analysis_type == "ADV":
+                if 'movimientos' not in dfs or dfs['movimientos'].empty:
+                    return self._create_empty_figure("No hay datos suficientes para análisis de patrones")
+                
+                df = dfs['movimientos'].copy()
+                # Si tenemos tiempos de duración, usarlos para análisis de degradación
+                if 'Duración (s)' in df.columns:
+                    date_col = 'Fecha'
+                    equipment_col = 'Equipo'
+                    value_col = 'Duración (s)'
+                    
+                    # Para el caso de ADV, usaremos el tiempo de movimiento como indicador
+                    # Seleccionar el equipo con más movimientos para análisis detallado
+                    top_equipment = df[equipment_col].value_counts().idxmax()
+                    time_series_df = df[df[equipment_col] == top_equipment].copy()
+                    
+                    # Verificar que tenemos suficientes datos para continuar
+                    if len(time_series_df) < 2:
+                        return self._create_empty_figure(f"Datos insuficientes para el equipo {top_equipment}")
+                    
+                    # Ordenar por fecha
+                    time_series_df['date'] = pd.to_datetime(time_series_df[date_col])
+                    time_series_df = time_series_df.sort_values('date').reset_index(drop=True)  # Resetear índice después de ordenar
+                    
+                    # Calcular media móvil de tiempos de movimiento
+                    time_series_df['moving_avg'] = time_series_df[value_col].rolling(
+                        window=min(5, len(time_series_df)),  # Usar window más pequeña si no hay suficientes datos
+                        min_periods=1
+                    ).mean()
+                    
+                    # Calcular desviación estándar móvil
+                    time_series_df['moving_std'] = time_series_df[value_col].rolling(
+                        window=min(5, len(time_series_df)),  # Usar window más pequeña si no hay suficientes datos
+                        min_periods=1
+                    ).std()
+                    
+                    # Identificar fases de degradación
+                    global_mean = time_series_df[value_col].mean()
+                    global_std = max(time_series_df[value_col].std(), 0.001)  # Evitar división por cero o valores muy pequeños
+                    
+                    time_series_df['phase'] = 1  # Fase normal por defecto
+                    time_series_df.loc[time_series_df[value_col] > global_mean + global_std, 'phase'] = 2
+                    time_series_df.loc[time_series_df[value_col] > global_mean + 2*global_std, 'phase'] = 3
+                    
+                    # Crear figura
+                    fig = go.Figure()
+                    
+                    # Añadir línea de valores reales
+                    fig.add_trace(go.Scatter(
+                        x=time_series_df['date'],
+                        y=time_series_df[value_col],
+                        mode='markers+lines',
+                        name='Tiempo de movimiento',
+                        marker=dict(
+                            color=time_series_df['phase'].map({
+                                1: 'green',
+                                2: 'orange',
+                                3: 'red'
+                            })
+                        ),
+                        line=dict(color='blue', width=1)
+                    ))
+                    
+                    # Añadir media móvil
+                    fig.add_trace(go.Scatter(
+                        x=time_series_df['date'],
+                        y=time_series_df['moving_avg'],
+                        mode='lines',
+                        name='Media móvil (5 puntos)',
+                        line=dict(color='purple', width=2)
+                    ))
+                    
+                    # Añadir líneas de umbral
+                    fig.add_trace(go.Scatter(
+                        x=time_series_df['date'],
+                        y=[global_mean] * len(time_series_df),
+                        mode='lines',
+                        name='Media global',
+                        line=dict(color='black', width=1, dash='dash')
+                    ))
+                    
+                    fig.add_trace(go.Scatter(
+                        x=time_series_df['date'],
+                        y=[global_mean + global_std] * len(time_series_df),
+                        mode='lines',
+                        name='Umbral de precaución (+1σ)',
+                        line=dict(color='orange', width=1, dash='dash')
+                    ))
+                    
+                    fig.add_trace(go.Scatter(
+                        x=time_series_df['date'],
+                        y=[global_mean + 2*global_std] * len(time_series_df),
+                        mode='lines',
+                        name='Umbral de alerta (+2σ)',
+                        line=dict(color='red', width=1, dash='dash')
+                    ))
+                    
+                    # Encontrar puntos de cambio de fase para destacarlos
+                    phase_changes = []
+                    
+                    if not time_series_df.empty:
+                        current_phase = time_series_df['phase'].iloc[0]
+                        
+                        for i, row in time_series_df.iterrows():
+                            if row['phase'] != current_phase:
+                                phase_changes.append({
+                                    'date': row['date'],
+                                    'value': row[value_col],
+                                    'old_phase': current_phase,
+                                    'new_phase': row['phase']
+                                })
+                                current_phase = row['phase']
+                    
+                    # Añadir anotaciones para los cambios de fase
+                    for change in phase_changes:
+                        direction = "↑" if change['new_phase'] > change['old_phase'] else "↓"
+                        color = "red" if change['new_phase'] > change['old_phase'] else "green"
+                        
+                        fig.add_annotation(
+                            x=change['date'],
+                            y=change['value'],
+                            text=f"Fase {change['old_phase']}{direction}Fase {change['new_phase']}",
+                            showarrow=True,
+                            arrowhead=1,
+                            arrowcolor=color,
+                            arrowsize=1,
+                            arrowwidth=2,
+                            ax=0,
+                            ay=-40
+                        )
+                    
+                    # CORRECCIÓN: Manejar las secciones sombreadas para cada fase con índices seguros
+                    # Identificar rangos continuos por fase
+                    def get_continuous_ranges(phase_series, phase_value):
+                        """Obtener rangos continuos de una fase específica"""
+                        ranges = []
+                        start_idx = None
+                        
+                        for idx, value in enumerate(phase_series):
+                            if value == phase_value and start_idx is None:
+                                start_idx = idx
+                            elif value != phase_value and start_idx is not None:
+                                ranges.append((start_idx, idx - 1))
+                                start_idx = None
+                        
+                        # No olvidar el último rango si termina con la fase indicada
+                        if start_idx is not None:
+                            ranges.append((start_idx, len(phase_series) - 1))
+                        
+                        return ranges
+                    
+                    # Procesamiento de cada fase con manejo seguro de índices
+                    for phase_value, color in [(1, "rgba(0,255,0,0.1)"), 
+                                            (2, "rgba(255,165,0,0.1)"), 
+                                            (3, "rgba(255,0,0,0.1)")]:
+                        
+                        phase_ranges = get_continuous_ranges(time_series_df['phase'], phase_value)
+                        
+                        for start_idx, end_idx in phase_ranges:
+                            # Verificar que los índices son válidos
+                            if 0 <= start_idx < len(time_series_df) and 0 <= end_idx < len(time_series_df):
+                                fig.add_shape(
+                                    type="rect",
+                                    x0=time_series_df.iloc[start_idx]['date'],
+                                    x1=time_series_df.iloc[end_idx]['date'],
+                                    y0=time_series_df[value_col].min() * 0.9,
+                                    y1=time_series_df[value_col].max() * 1.1,
+                                    fillcolor=color,
+                                    line=dict(width=0),
+                                    layer="below"
+                                )
+                    
+                    # Calcular características de degradación
+                    if len(time_series_df) >= 10:
+                        # Ajustar modelo de regresión para determinar tendencia
+                        X = np.array(range(len(time_series_df))).reshape(-1, 1)
+                        y = time_series_df[value_col].values
+                        
+                        try:
+                            model = LinearRegression()
+                            model.fit(X, y)
+                            
+                            slope = model.coef_[0]
+                            slope_pct = slope / time_series_df[value_col].mean() * 100
+                            
+                            # Determinar fase actual del sistema
+                            current_phase = time_series_df['phase'].iloc[-1]
+                            phase_names = {1: "Normal", 2: "Precaución", 3: "Alerta"}
+                            
+                            # Predecir momento de fallo
+                            if slope > 0:  # Tendencia creciente = degradación
+                                time_to_critical = (global_mean + 3*global_std - time_series_df[value_col].iloc[-1]) / slope
+                                time_to_critical = max(0, time_to_critical)  # No permitir valores negativos
+                                
+                                failure_date = time_series_df['date'].iloc[-1] + pd.Timedelta(days=time_to_critical)
+                                
+                                # Añadir anotación con predicción
+                                fig.add_annotation(
+                                    x=0.02,
+                                    y=0.02,
+                                    xref="paper",
+                                    yref="paper",
+                                    text=f"<b>Análisis de Degradación</b><br>" +
+                                        f"Fase actual: <b>{phase_names[current_phase]}</b><br>" +
+                                        f"Tasa de degradación: {slope_pct:.2f}% por día<br>" +
+                                        f"Tiempo estimado hasta fallo: {time_to_critical:.1f} días<br>" +
+                                        f"Fecha estimada de fallo: {failure_date.strftime('%d/%m/%Y')}",
+                                    showarrow=False,
+                                    align="left",
+                                    bgcolor="white",
+                                    bordercolor="black",
+                                    borderwidth=1,
+                                    borderpad=4
+                                )
+                            else:
+                                # No hay degradación (tendencia estable o decreciente)
+                                fig.add_annotation(
+                                    x=0.02,
+                                    y=0.02,
+                                    xref="paper",
+                                    yref="paper",
+                                    text=f"<b>Análisis de Degradación</b><br>" +
+                                        f"Fase actual: <b>{phase_names[current_phase]}</b><br>" +
+                                        f"No se detecta degradación progresiva<br>" +
+                                        f"Tendencia: {slope_pct:.2f}% por día",
+                                    showarrow=False,
+                                    align="left",
+                                    bgcolor="white",
+                                    bordercolor="black",
+                                    borderwidth=1,
+                                    borderpad=4
+                                )
+                        except Exception as e:
+                            logger.warning(f"Error al calcular regresión: {str(e)}")
+                    
+                    # Configurar layout
+                    fig.update_layout(
+                        title=f"Análisis de Patrones de Degradación - {top_equipment}",
+                        xaxis_title="Fecha",
+                        yaxis_title="Tiempo de Movimiento (s)",
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        font_color=self.colors['text'] if hasattr(self, 'colors') and 'text' in self.colors else 'black',
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1
+                        ),
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        height=500
+                    )
+                    
+                    return fig
+                
+                else:
+                    return self._create_empty_figure("No hay datos de tiempo de movimiento para análisis de degradación")
+            
+            else:
+                return self._create_empty_figure("Tipo de análisis no soportado para patrones de degradación")
+        
+        except Exception as e:
+            logger.error(f"Error en create_degradation_pattern_analysis: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return self._create_empty_figure(f"Error en análisis de patrones: {str(e)}")
+
+
+##################################################################################################################
     
     def generate_insights(self, filtered_dataframes=None):
         """Generar insights y recomendaciones basadas en el análisis de datos"""
@@ -864,22 +1511,38 @@ class DashboardGenerator:
         
         try:
             # Generar insights iniciales si no existen
-            if not self.insights:
+            if not hasattr(self, 'insights') or not self.insights:
                 self.insights = self.generate_insights()
                 
             # Después de cargar los dataframes pero antes de crear el dashboard
             if hasattr(self, 'dataframes') and self.dataframes:
-                print(f"Dashboard: Dataframes cargados: {list(self.dataframes.keys())}")
+                logger.info(f"Dashboard: Dataframes cargados: {list(self.dataframes.keys())}")
                 
                 # Depuración especial para ADV
-                if self.analysis_type == "ADV":
+                if hasattr(self, 'analysis_type') and self.analysis_type == "ADV":
                     if 'movimientos' in self.dataframes:
-                        print(f"Dashboard: Datos de movimientos: {len(self.dataframes['movimientos'])} filas")
+                        logger.info(f"Dashboard: Datos de movimientos: {len(self.dataframes['movimientos'])} filas")
                         if 'Equipo' in self.dataframes['movimientos'].columns:
                             equipos = self.dataframes['movimientos']['Equipo'].unique()
-                            print(f"Dashboard: Equipos disponibles: {equipos}")
+                            logger.info(f"Dashboard: Equipos disponibles: {equipos}")
                         else:
-                            print(f"Dashboard: Columnas en movimientos: {self.dataframes['movimientos'].columns.tolist()}")
+                            logger.info(f"Dashboard: Columnas en movimientos: {self.dataframes['movimientos'].columns.tolist()}")
+            
+            # Verificar que los atributos necesarios existen
+            if not hasattr(self, 'line') or not hasattr(self, 'analysis_type'):
+                logger.error("Atributos 'line' o 'analysis_type' no definidos")
+                return False
+                
+            # Verificar que se han definido los colores
+            if not hasattr(self, 'colors'):
+                self.colors = {
+                    'primary': '#3498db',
+                    'secondary': '#2C3E50',
+                    'success': '#2ecc71',
+                    'danger': '#e74c3c',
+                    'warning': '#f39c12',
+                    'card_background': '#ffffff'
+                }
             
             # Crear aplicación Dash con estilos externos
             self.app = dash.Dash(
@@ -914,6 +1577,48 @@ class DashboardGenerator:
                                 ]),
                                 html.Div(className='card-body', children=[
                                     dcc.Graph(id='timeline-graph', figure=self.create_timeline_figure())
+                                ])
+                            ])
+                        ])
+                    ]),
+                    
+                    # Fila para gráfico de proyección de tendencia
+                    html.Div(className='row mb-4', children=[
+                        html.Div(className='col-md-12', children=[
+                            html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
+                                html.Div(className='card-header', children=[
+                                    html.H5("Proyección de Tendencia", className='card-title')
+                                ]),
+                                html.Div(className='card-body', children=[
+                                    dcc.Graph(id='forecast-trend-graph', figure=self.create_forecast_trend_graph())
+                                ])
+                            ])
+                        ])
+                    ]),
+                    
+                    # Fila para matriz de riesgo de degradación
+                    html.Div(className='row mb-4', children=[
+                        html.Div(className='col-md-12', children=[
+                            html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
+                                html.Div(className='card-header', children=[
+                                    html.H5("Matriz de Riesgo de Degradación", className='card-title')
+                                ]),
+                                html.Div(className='card-body', children=[
+                                    dcc.Graph(id='degradation-risk-matrix', figure=self.create_degradation_risk_matrix())
+                                ])
+                            ])
+                        ])
+                    ]),
+                    
+                    # Fila para análisis de patrones de degradación
+                    html.Div(className='row mb-4', children=[
+                        html.Div(className='col-md-12', children=[
+                            html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
+                                html.Div(className='card-header', children=[
+                                    html.H5("Análisis de Patrones de Degradación", className='card-title')
+                                ]),
+                                html.Div(className='card-body', children=[
+                                    dcc.Graph(id='degradation-pattern-analysis', figure=self.create_degradation_pattern_analysis())
                                 ])
                             ])
                         ])
@@ -1055,7 +1760,7 @@ class DashboardGenerator:
                                 html.Div(className='card-body', id='maintenance-predictive-body', children=[
                                     html.Ul(id='recomendaciones-predictivas-list', children=[
                                         html.Li(rec, className='mb-2') 
-                                        for rec in self.insights.get('recomendaciones_predictivas', [])
+                                        for rec in self.insights.get('recomendaciones_predictivas', []) or []
                                     ])
                                 ])
                             ])
@@ -1068,7 +1773,7 @@ class DashboardGenerator:
                                 html.Div(className='card-body', id='maintenance-preventive-body', children=[
                                     html.Ul(id='recomendaciones-preventivas-list', children=[
                                         html.Li(rec, className='mb-2') 
-                                        for rec in self.insights.get('recomendaciones_preventivas', [])
+                                        for rec in self.insights.get('recomendaciones_preventivas', []) or []
                                     ])
                                 ])
                             ])
@@ -1084,7 +1789,7 @@ class DashboardGenerator:
                                 ]),
                                 html.Div(className='card-body', id='patrones-body', children=[
                                     html.Ul(id='patrones-list', children=[
-                                        html.Li(pat) for pat in self.insights.get('patrones_detectados', [])
+                                        html.Li(pat) for pat in self.insights.get('patrones_detectados', []) or []
                                     ]) if self.insights.get('patrones_detectados', []) else 
                                     html.P("No se detectaron patrones significativos")
                                 ])
@@ -1116,6 +1821,8 @@ class DashboardGenerator:
             
         except Exception as e:
             logger.error(f"Error al crear el dashboard: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def create_kpi_cards(self):
