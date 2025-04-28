@@ -504,26 +504,36 @@ class ADVProcessorL2CSV(BaseProcessor):
             # Asegurar que Duración es numérica
             self.df_L2_ADV_MOV['Duración (s)'] = pd.to_numeric(self.df_L2_ADV_MOV['Duración (s)'], errors='coerce')
             
-            # Calcular estadísticas de tiempo por equipo
+            # Calcular estadísticas más robustas
             self.df_L2_ADV_TIME = self.df_L2_ADV_MOV.groupby('Equipo')['Duración (s)'].agg([
-                'count', 'mean', 'std', 'min', 'max'
+                'count', 'mean', 'std', 'min', 'max', 
+                ('median', lambda x: x.median()),  # Mediana
+                ('q1', lambda x: x.quantile(0.25)),  # Primer cuartil
+                ('q3', lambda x: x.quantile(0.75))   # Tercer cuartil
             ]).reset_index()
             
             # Manejar el caso donde la desviación estándar es NaN
             self.df_L2_ADV_TIME['std'] = self.df_L2_ADV_TIME['std'].fillna(0)
             
-            # Calcular umbrales para detección de anomalías
-            self.df_L2_ADV_TIME['umbral_superior'] = self.df_L2_ADV_TIME['mean'] + (self.df_L2_ADV_TIME['std'] * self.time_threshold)
+            # Calcular IQR (rango intercuartílico)
+            self.df_L2_ADV_TIME['iqr'] = self.df_L2_ADV_TIME['q3'] - self.df_L2_ADV_TIME['q1']
+            
+            # Establecer umbrales más robustos
+            self.df_L2_ADV_TIME['umbral_superior_med'] = self.df_L2_ADV_TIME['median'] + (1.5 * self.df_L2_ADV_TIME['iqr'])
+            self.df_L2_ADV_TIME['umbral_superior_mean'] = self.df_L2_ADV_TIME['mean'] + (self.df_L2_ADV_TIME['std'] * self.time_threshold)
+            self.df_L2_ADV_TIME['umbral_superior'] = self.df_L2_ADV_TIME['umbral_superior_mean']  # Mantener para compatibilidad
             
             # Identificar movimientos anormalmente largos
             self.df_L2_ADV_MOV = self.df_L2_ADV_MOV.merge(
-                self.df_L2_ADV_TIME[['Equipo', 'mean', 'umbral_superior']], 
+                self.df_L2_ADV_TIME[['Equipo', 'mean', 'median', 'umbral_superior', 'umbral_superior_med', 'umbral_superior_mean']], 
                 on='Equipo',
                 how='left'
             )
             
-            # Marcar los movimientos anómalos
-            self.df_L2_ADV_MOV['Anomalía'] = self.df_L2_ADV_MOV['Duración (s)'] > self.df_L2_ADV_MOV['umbral_superior']
+            # Marcar anomalías con ambos métodos
+            self.df_L2_ADV_MOV['Anomalía_Media'] = self.df_L2_ADV_MOV['Duración (s)'] > self.df_L2_ADV_MOV['umbral_superior_mean']
+            self.df_L2_ADV_MOV['Anomalía_Mediana'] = self.df_L2_ADV_MOV['Duración (s)'] > self.df_L2_ADV_MOV['umbral_superior_med']
+            self.df_L2_ADV_MOV['Anomalía'] = self.df_L2_ADV_MOV['Anomalía_Media'] | self.df_L2_ADV_MOV['Anomalía_Mediana']
             
             # Crear ID único para cada registro
             self.df_L2_ADV_MOV['Fecha'] = pd.to_datetime(self.df_L2_ADV_MOV['Fecha']).dt.strftime('%Y-%m-%d')
@@ -560,6 +570,88 @@ class ADVProcessorL2CSV(BaseProcessor):
         
         if progress_callback:
             progress_callback(40, "Preprocesamiento completado")
+            
+        # Agregar análisis de tendencia por equipo
+        if progress_callback:
+            progress_callback(45, "Realizando análisis de tendencias...")
+        
+        try:
+            for equipo in self.df_L2_ADV_MOV['Equipo'].unique():
+                # Filtrar movimientos para este equipo
+                equipo_df = self.df_L2_ADV_MOV[self.df_L2_ADV_MOV['Equipo'] == equipo].copy()
+                
+                # Ordenar por fecha
+                equipo_df = equipo_df.sort_values('Fecha')
+                
+                # Si hay suficientes datos, calcular tendencia
+                if len(equipo_df) >= 5:
+                    # Crear índice numérico para regresión
+                    equipo_df['idx'] = range(len(equipo_df))
+                    
+                    # Ajustar línea de tendencia
+                    from scipy import stats
+                    slope, intercept, r_value, p_value, std_err = stats.linregress(
+                        equipo_df['idx'], equipo_df['Duración (s)']
+                    )
+                    
+                    # Guardar pendiente y significancia
+                    self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['Equipo'] == equipo, 'trend_slope'] = slope
+                    self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['Equipo'] == equipo, 'trend_pvalue'] = p_value
+                    self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['Equipo'] == equipo, 'trend_significant'] = (p_value < 0.05) & (slope > 0)
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error en análisis de tendencias: {str(e)}")
+        
+        # Clasificar agujas según nivel de alerta
+        if progress_callback:
+            progress_callback(50, "Clasificando agujas por nivel de alerta...")
+        
+        try:
+            # Inicializar nivel de alerta
+            self.df_L2_ADV_TIME['alerta_nivel'] = 'Normal'
+            
+            # Nivel de alerta según porcentaje de anomalías
+            anomalias_count = self.df_L2_ADV_MOV.groupby('Equipo')['Anomalía'].mean().reset_index()
+            anomalias_count.columns = ['Equipo', 'porcentaje_anomalias']
+            self.df_L2_ADV_TIME = self.df_L2_ADV_TIME.merge(anomalias_count, on='Equipo', how='left')
+            
+            # Agujas críticas: alta frecuencia de anomalías o tendencia creciente significativa
+            self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['porcentaje_anomalias'] > 0.3, 'alerta_nivel'] = 'Crítico'
+            self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME.get('trend_significant', pd.Series([False] * len(self.df_L2_ADV_TIME))) == True, 'alerta_nivel'] = 'Advertencia'
+            self.df_L2_ADV_TIME.loc[(self.df_L2_ADV_TIME.get('trend_significant', pd.Series([False] * len(self.df_L2_ADV_TIME))) == True) & 
+                                (self.df_L2_ADV_TIME['porcentaje_anomalias'] > 0.2), 'alerta_nivel'] = 'Crítico'
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error en clasificación de alertas: {str(e)}")
+        
+        # Generar recomendaciones de mantenimiento personalizadas
+        if progress_callback:
+            progress_callback(55, "Generando recomendaciones de mantenimiento...")
+        
+        try:
+            # Crear campo de recomendaciones
+            self.df_L2_ADV_TIME['recomendacion'] = ''
+            
+            # Recomendaciones por nivel de alerta
+            self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['alerta_nivel'] == 'Normal', 'recomendacion'] = 'Mantenimiento rutinario'
+            self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['alerta_nivel'] == 'Advertencia', 'recomendacion'] = 'Inspección en próximos 15 días'
+            self.df_L2_ADV_TIME.loc[self.df_L2_ADV_TIME['alerta_nivel'] == 'Crítico', 'recomendacion'] = 'Mantenimiento correctivo urgente'
+            
+            # Refinar recomendaciones según tipo de anomalía
+            for idx, row in self.df_L2_ADV_TIME.iterrows():
+                if row['alerta_nivel'] == 'Crítico':
+                    if row.get('trend_significant', False):
+                        self.df_L2_ADV_TIME.loc[idx, 'recomendacion'] += ' - Degradación progresiva detectada'
+                    
+                    # Verificar variabilidad
+                    if 'iqr' in row and 'median' in row and row['iqr'] > (row['median'] * 0.5):
+                        self.df_L2_ADV_TIME.loc[idx, 'recomendacion'] += ' - Alta variabilidad en tiempos'
+        except Exception as e:
+            if progress_callback:
+                progress_callback(None, f"Error generando recomendaciones: {str(e)}")
+        
+        if progress_callback:
+            progress_callback(60, "Análisis predictivo completado")
         
         return True
     

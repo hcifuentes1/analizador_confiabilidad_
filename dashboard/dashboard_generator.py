@@ -675,6 +675,115 @@ class DashboardGenerator:
         except Exception as e:
             logger.error(f"Error en predicción de tendencia: {str(e)}")
             return None
+        
+    def create_timeline_figure(self, dataframes=None):
+        """Crear gráfico de línea de tiempo de movimientos por hora del día"""
+        # Usar los dataframes filtrados si se proporcionan, o los originales si no
+        dfs = dataframes if dataframes else self.dataframes
+        
+        if self.analysis_type == "ADV" and 'movimientos' in dfs and not dfs['movimientos'].empty:
+            df = dfs['movimientos'].copy()
+            
+            # Extraer hora del día para el eje X
+            if 'Hora Inicio' in df.columns:
+                # Convertir a datetime si es string
+                if isinstance(df['Hora Inicio'].iloc[0], str):
+                    try:
+                        # Primero intentar con formato estándar
+                        df['hora_numeric'] = pd.to_datetime(df['Hora Inicio'], format='%H:%M:%S').dt.hour + \
+                                            pd.to_datetime(df['Hora Inicio'], format='%H:%M:%S').dt.minute / 60
+                    except ValueError:
+                        # Si falla, usar un enfoque más flexible que maneje milisegundos
+                        df['hora_numeric'] = df['Hora Inicio'].apply(
+                            lambda x: float(x.split(':')[0]) + float(x.split(':')[1])/60 if ':' in x else float(x)
+                        )
+                else:
+                    # Si ya es tipo time
+                    df['hora_numeric'] = df['Hora Inicio'].apply(lambda x: x.hour + x.minute / 60)
+            
+            # Crear figura
+            fig = go.Figure()
+            
+            # Añadir línea de tiempo y duración
+            fig.add_trace(go.Scatter(
+                x=df['hora_numeric'],
+                y=df['Duración (s)'],
+                mode='markers',
+                marker=dict(
+                    size=10,
+                    color=df['Duración (s)'],
+                    colorscale='Viridis',
+                    showscale=True,
+                    colorbar=dict(title="Duración (s)")
+                ),
+                text=df['Equipo'],
+                hovertemplate='<b>Equipo:</b> %{text}<br>' +
+                            '<b>Hora:</b> %{x:.2f}<br>' +
+                            '<b>Duración:</b> %{y:.2f} s<br>'
+            ))
+            
+            # Añadir línea de umbral si existe
+            if 'umbral_superior' in df.columns:
+                # Usar el umbral promedio para simplificar
+                umbral_medio = df['umbral_superior'].mean()
+                fig.add_shape(
+                    type="line",
+                    x0=df['hora_numeric'].min(),
+                    y0=umbral_medio,
+                    x1=df['hora_numeric'].max(),
+                    y1=umbral_medio,
+                    line=dict(
+                        color="red",
+                        width=2,
+                        dash="dash",
+                    ),
+                    name="Umbral"
+                )
+                
+                # Añadir anotación explicando el umbral
+                fig.add_annotation(
+                    x=df['hora_numeric'].max(),
+                    y=umbral_medio,
+                    text=f"Umbral: {umbral_medio:.2f}s",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=50,
+                    ay=0
+                )
+            
+            # Configurar layout
+            fig.update_layout(
+                title="Tiempos de Movimiento por Hora del Día",
+                xaxis_title="Hora del día",
+                yaxis_title="Duración del movimiento (s)",
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                font_color=self.colors['text'],
+                margin=dict(l=10, r=10, t=50, b=10),
+                height=400
+            )
+            
+            # Mejorar formato del eje X (horas)
+            fig.update_xaxes(
+                tickmode='array',
+                tickvals=list(range(0, 25, 2)),
+                ticktext=[f"{h}:00" for h in range(0, 25, 2)]
+            )
+            
+            return fig
+        
+        # Figura vacía en caso de no tener datos
+        fig = go.Figure()
+        fig.update_layout(
+            title="No hay datos disponibles para mostrar línea de tiempo",
+            xaxis=dict(title="Hora del día"),
+            yaxis=dict(title="Duración (s)"),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font_color=self.colors['text']
+        )
+        
+        return fig
 
     
     def create_dashboard(self):
@@ -724,7 +833,21 @@ class DashboardGenerator:
                 # Contenedor principal
                 html.Div(className='container-fluid px-4', children=[
                     # Fila de KPIs
-                    html.Div(className='row mb-4 g-3', children=self.create_kpi_cards()),  # Corrección aquí
+                    html.Div(className='row mb-4 g-3', children=self.create_kpi_cards()),
+                    
+                    # Fila para gráfico de línea de tiempo (nueva fila)
+                    html.Div(className='row mb-4', children=[
+                        html.Div(className='col-md-12', children=[
+                            html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
+                                html.Div(className='card-header', children=[
+                                    html.H5("Línea de Tiempo de Movimientos", className='card-title')
+                                ]),
+                                html.Div(className='card-body', children=[
+                                    dcc.Graph(id='timeline-graph', figure=self.create_timeline_figure())
+                                ])
+                            ])
+                        ])
+                    ]),
                     
                     # Fila de gráficos principales
                     html.Div(className='row mb-4', children=[
@@ -834,7 +957,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de alertas urgentes (nueva)
+                    # Fila de alertas urgentes
                     html.Div(id='alertas-container', className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1110,8 +1233,143 @@ class DashboardGenerator:
                         ])
                     ])
                 )
+                    
+            elif self.analysis_type == "ADV":
+                # KPIs para ADV
                 
-            # [El resto del código para ADV...]
+                # Total de discordancias
+                total_disc = len(self.dataframes.get('discordancias', pd.DataFrame()))
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': '#E74C3C', 'borderBottom': 'none'}, 
+                                    children=[html.H5("Discordancias", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.H1(f"{total_disc}", className='display-4 mb-0 fw-bold'),
+                                html.P("Total detectadas", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
+                
+                # Total de movimientos anómalos
+                mov_anomalos = 0
+                if 'movimientos' in self.dataframes and 'Anomalía' in self.dataframes['movimientos'].columns:
+                    mov_anomalos = self.dataframes['movimientos']['Anomalía'].sum()
+                    
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': '#F39C12', 'borderBottom': 'none'}, 
+                                    children=[html.H5("Movimientos Anómalos", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.H1(f"{mov_anomalos}", className='display-4 mb-0 fw-bold'),
+                                html.P("Tiempo excesivo", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
+                
+                # Equipos con tendencia degradada
+                equipos_tendencia = 0
+                if hasattr(self, 'df_L2_ADV_TIME') and 'trend_significant' in self.df_L2_ADV_TIME.columns:
+                    equipos_tendencia = self.df_L2_ADV_TIME['trend_significant'].sum()
+                
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': '#9B59B6', 'borderBottom': 'none'}, 
+                                    children=[html.H5("Degradación Progresiva", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.H1(f"{equipos_tendencia}", className='display-4 mb-0 fw-bold'),
+                                html.P("Agujas con tendencia creciente", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
+                
+                # Equipos en estado crítico
+                equipos_criticos = 0
+                if hasattr(self, 'df_L2_ADV_TIME') and 'alerta_nivel' in self.df_L2_ADV_TIME.columns:
+                    equipos_criticos = (self.df_L2_ADV_TIME['alerta_nivel'] == 'Crítico').sum()
+                else:
+                    # Alternativa si no está disponible en el dataframe de tiempos
+                    if hasattr(self, 'insights') and self.insights and 'alertas_urgentes' in self.insights:
+                        equipos_criticos = len(self.insights['alertas_urgentes'])
+                
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': '#C0392B', 'borderBottom': 'none'}, 
+                                    children=[html.H5("Agujas Críticas", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.H1(f"{equipos_criticos}", className='display-4 mb-0 fw-bold'),
+                                html.P("Requieren atención inmediata", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
+                
+                # Tiempo promedio de movimiento
+                tiempo_promedio = "N/A"
+                if 'movimientos' in self.dataframes and 'Duración (s)' in self.dataframes['movimientos'].columns:
+                    tiempo_promedio = f"{self.dataframes['movimientos']['Duración (s)'].mean():.2f}s"
+                    
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': '#3498DB', 'borderBottom': 'none'}, 
+                                    children=[html.H5("Tiempo Promedio", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.H1(f"{tiempo_promedio}", className='display-4 mb-0 fw-bold'),
+                                html.P("Duración media de movimiento", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
+                
+                # Estado general del sistema
+                estado_sistema = "NORMAL"
+                estado_color = "#2ECC71"  # Verde por defecto
+                
+                if equipos_tendencia > 0:
+                    estado_sistema = "ATENCIÓN PREVENTIVA"
+                    estado_color = "#3498DB"  # Azul
+                    
+                if equipos_criticos > 0:
+                    estado_sistema = "REQUIERE ATENCIÓN"
+                    estado_color = "#F39C12"  # Amarillo
+                    
+                if equipos_criticos > 2 or total_disc > 5:
+                    estado_sistema = "CRÍTICO"
+                    estado_color = "#E74C3C"  # Rojo
+                
+                kpi_cards.append(
+                    html.Div(className='col-md-4 col-lg-3 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', style={'borderRadius': '10px', 'overflow': 'hidden'}, children=[
+                            html.Div(className='card-header text-white text-center py-3', 
+                                    style={'backgroundColor': estado_color, 'borderBottom': 'none'}, 
+                                    children=[html.H5("Estado del Sistema", className='m-0 fw-bold')]),
+                            html.Div(className='card-body text-center d-flex flex-column justify-content-center', children=[
+                                html.Div([
+                                    html.Span("✅" if estado_sistema == "NORMAL" else 
+                                            "ℹ️" if estado_sistema == "ATENCIÓN PREVENTIVA" else
+                                            "⚠️" if estado_sistema == "REQUIERE ATENCIÓN" else "❌", 
+                                            style={'fontSize': '2rem', 'marginRight': '10px'}),
+                                    html.H2(f"{estado_sistema}", 
+                                        className='mb-0 fw-bold d-inline',
+                                        style={'color': estado_color})
+                                ]),
+                                html.P("Evaluación general", className='card-text text-muted')
+                            ])
+                        ])
+                    ])
+                )
 
         except Exception as e:
             logger.error(f"Error al crear tarjetas KPI: {str(e)}")
@@ -1608,7 +1866,7 @@ class DashboardGenerator:
         return fig
     
     def create_data_table(self):
-        """Crear tabla de datos"""
+        """Crear tabla de datos con detalle de motivos y resaltado de anomalías"""
         if self.analysis_type == "CDV":
             if 'fallos_ocupacion' in self.dataframes and not self.dataframes['fallos_ocupacion'].empty:
                 df = self.dataframes['fallos_ocupacion'].copy()
@@ -1628,32 +1886,116 @@ class DashboardGenerator:
                         [html.Tr([html.Td(df.iloc[i][col]) for col in df.columns]) for i in range(min(50, len(df)))],
                         className='table table-striped table-hover'
                     )
-                
-        elif self.analysis_type == "ADV":
-            if 'discordancias' in self.dataframes and not self.dataframes['discordancias'].empty:
-                df = self.dataframes['discordancias'].copy()
-                
-                # Seleccionar columnas relevantes
-                columns_to_show = ['Fecha Hora', 'Equipo Estacion', 'Linea']
-                columns_present = [col for col in columns_to_show if col in df.columns]
-                
-                if columns_present:
-                    df = df[columns_present]
                     
-                    # Formatear para mostrar si es necesario
-                    if 'Fecha Hora' in df.columns:
-                        df['Fecha Hora'] = pd.to_datetime(df['Fecha Hora']).dt.strftime('%d-%m-%Y %H:%M:%S')
+            elif self.analysis_type == "ADV":
+                # Primero intentamos mostrar las discordancias
+                if 'discordancias' in self.dataframes and not self.dataframes['discordancias'].empty:
+                    df = self.dataframes['discordancias'].copy()
                     
-                    return html.Table(
-                        # Encabezado
-                        [html.Tr([html.Th(col) for col in df.columns])] +
-                        # Cuerpo
-                        [html.Tr([html.Td(df.iloc[i][col]) for col in df.columns]) for i in range(min(50, len(df)))],
-                        className='table table-striped table-hover'
-                    )
-        
-        # Tabla vacía en caso de no tener datos
-        return html.Div("No hay datos disponibles para mostrar en la tabla.")
+                    # Añadir columna de motivo
+                    df['Motivo'] = "No especificado"
+                    
+                    # Determinar motivo según los campos disponibles
+                    if 'Estado Izquierda' in df.columns and 'Estado Derecha' in df.columns:
+                        # Caso 1: Ambos estados en 1 (discordancia clásica)
+                        df.loc[(df['Estado Izquierda'] == 1) & (df['Estado Derecha'] == 1), 'Motivo'] = "Ambos lados activos"
+                        
+                        # Caso 2: Transición directa sin pasar por movimiento
+                        df.loc[df['Tipo'] == 'Transición directa', 'Motivo'] = "Transición directa sin movimiento"
+                    
+                    if 'Duración (s)' in df.columns and 'umbral_superior' in df.columns:
+                        # Caso 3: Tiempo de movimiento excesivo
+                        df.loc[df['Duración (s)'] > df['umbral_superior'], 'Motivo'] = f"Tiempo de movimiento excesivo ({df['Duración (s)']:.2f}s)"
+                    
+                    # Seleccionar columnas relevantes
+                    columns_to_show = ['Fecha Hora', 'Equipo Estacion', 'Motivo', 'Linea']
+                    columns_present = [col for col in columns_to_show if col in df.columns]
+                    
+                    # Añadir más columnas informativas
+                    if 'Estado Izquierda' in df.columns and 'Estado Derecha' in df.columns:
+                        df['Estados'] = df['Estado Izquierda'].astype(str) + '/' + df['Estado Derecha'].astype(str)
+                        columns_present.append('Estados')
+                    
+                    if columns_present:
+                        df = df[columns_present]
+                        
+                        # Formatear para mostrar si es necesario
+                        if 'Fecha Hora' in df.columns:
+                            df['Fecha Hora'] = pd.to_datetime(df['Fecha Hora']).dt.strftime('%d-%m-%Y %H:%M:%S')
+                        
+                        return html.Table(
+                            # Encabezado
+                            [html.Tr([html.Th(col) for col in df.columns])] +
+                            # Cuerpo con resaltado para todas las discordancias
+                            [html.Tr([
+                                html.Td(df.iloc[i][col], style={'color': 'red', 'fontWeight': 'bold'})
+                                for col in df.columns
+                            ]) for i in range(min(50, len(df)))],
+                            className='table table-striped table-hover'
+                        )
+                
+                # Si no hay discordancias o están vacías, mostramos movimientos
+                if 'movimientos' in self.dataframes and not self.dataframes['movimientos'].empty:
+                    df = self.dataframes['movimientos'].copy()
+                    
+                    # Añadir columna de motivo
+                    df['Motivo'] = "Movimiento normal"
+                    
+                    # Marcar movimientos anómalos
+                    if 'Anomalía' in df.columns:
+                        df.loc[df['Anomalía'] == True, 'Motivo'] = "Tiempo de movimiento anómalo"
+                        
+                        # Detallar el tipo de anomalía si es posible
+                        if 'Anomalía_Media' in df.columns and 'Anomalía_Mediana' in df.columns:
+                            df.loc[(df['Anomalía_Media'] == True) & (df['Anomalía_Mediana'] == True), 'Motivo'] = "Anomalía por media y mediana"
+                            df.loc[(df['Anomalía_Media'] == True) & (df['Anomalía_Mediana'] == False), 'Motivo'] = "Anomalía por media"
+                            df.loc[(df['Anomalía_Media'] == False) & (df['Anomalía_Mediana'] == True), 'Motivo'] = "Anomalía por mediana"
+                    
+                    # Mostrar primero las anomalías
+                    df_anomalias = df[df['Anomalía'] == True].copy() if 'Anomalía' in df.columns else pd.DataFrame()
+                    df_normales = df[~df['Anomalía']].copy() if 'Anomalía' in df.columns else df.copy()
+                    
+                    # Si hay muchos datos normales, tomar solo una muestra
+                    if len(df_normales) > 20:
+                        df_normales = df_normales.sample(20)
+                    
+                    # Combinar anomalías + muestra de normales
+                    if not df_anomalias.empty:
+                        df = pd.concat([df_anomalias, df_normales])
+                    else:
+                        df = df_normales.head(50)  # Limitar a 50 registros si no hay anomalías
+                    
+                    # Ordenar primero por anomalía y luego por duración descendente
+                    if 'Anomalía' in df.columns and 'Duración (s)' in df.columns:
+                        df = df.sort_values(['Anomalía', 'Duración (s)'], ascending=[False, False])
+                    elif 'Duración (s)' in df.columns:
+                        df = df.sort_values('Duración (s)', ascending=False)
+                    
+                    # Seleccionar columnas relevantes
+                    columns_to_show = ['Fecha', 'Hora Inicio', 'Hora Fin', 'Duración (s)', 'Equipo', 'Motivo', 'Linea']
+                    columns_present = [col for col in columns_to_show if col in df.columns]
+                    
+                    if columns_present:
+                        df = df[columns_present]
+                        
+                        return html.Table(
+                            # Encabezado
+                            [html.Tr([html.Th(col) for col in df.columns])] +
+                            # Cuerpo con estilo condicional para resaltar anomalías
+                            [html.Tr([
+                                html.Td(
+                                    df.iloc[i][col], 
+                                    style={'color': 'red', 'fontWeight': 'bold'} 
+                                    if ('Motivo' in df.columns and 'anómal' in str(df.iloc[i]['Motivo'])) 
+                                    else {}
+                                )
+                                for col in df.columns
+                            ]) for i in range(min(50, len(df)))],
+                            className='table table-striped table-hover'
+                        )
+            
+            # Tabla vacía en caso de no tener datos
+            return html.Div("No hay datos disponibles para mostrar en la tabla.")
     
     def get_min_date(self):
         """Obtener la fecha mínima de los datos"""
@@ -1715,16 +2057,58 @@ class DashboardGenerator:
         if not self.app:
             return
         
+        # Añadir un callback para debugging
+        @self.app.callback(
+            Output('apply-filters-button', 'style'),
+            [Input('apply-filters-button', 'n_clicks')]
+        )
+        def debug_callback(n_clicks):
+            if n_clicks:
+                print(f"Botón de filtros presionado: {n_clicks} veces")
+            return {'backgroundColor': self.colors['secondary'],
+                    'color': 'white',
+                    'fontWeight': 'bold',
+                    'padding': '10px 20px',
+                    'border': 'none',
+                    'borderRadius': '5px',
+                    'cursor': 'pointer'}
+            
+        @self.app.callback(
+            [Output('time-trend-graph', 'figure'),
+            Output('equipment-distribution', 'figure'),
+            Output('hourly-distribution', 'figure'),
+            Output('heatmap', 'figure'),
+            Output('timeline-graph', 'figure'),
+            Output('alertas-list', 'children'),
+            Output('recomendaciones-predictivas-list', 'children'),
+            Output('recomendaciones-preventivas-list', 'children'),
+            Output('patrones-list', 'children')],
+            [Input('apply-filters-button', 'n_clicks')],
+            [State('date-range', 'start_date'),
+            State('date-range', 'end_date'),
+            State('equipment-filter', 'value'),
+            State('visualization-type', 'value')]
+        )
+        
         # Definir la función del callback
         def update_graphs_and_recommendations(n_clicks, start_date, end_date, selected_equipments, viz_type):
+            
+            # Debugging
+            print(f"Callback principal activado. n_clicks: {n_clicks}")
+            print(f"Fechas: {start_date} a {end_date}")
+            print(f"Equipos seleccionados: {selected_equipments}")
+            print(f"Tipo visualización: {viz_type}")
+            
+            
             # No actualizar si no se ha presionado el botón
             if n_clicks is None:
-                # Retornar valores iniciales
+                # Retornar valores iniciales para TODOS los gráficos
                 return [
                     self.create_time_trend_figure(), 
                     self.create_equipment_distribution_figure(),
                     self.create_hourly_distribution_figure(),
                     self.create_heatmap_figure(),
+                    self.create_timeline_figure(),  # Añadir el nuevo gráfico
                     # Lista de elementos para las alertas
                     [html.Li(alerta, className='alert alert-danger') for alerta in self.insights.get('alertas_urgentes', [])] 
                     if self.insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
@@ -1784,12 +2168,13 @@ class DashboardGenerator:
                     # Generar insights actualizados basados en datos filtrados
                     updated_insights = self.generate_insights(filtered_dfs)
                     
-                    # Retornar todos los componentes actualizados
+                    # Retornar todos los componentes actualizados - asegurarse de incluir el timeline-graph
                     return [
                         self.create_time_trend_figure(dataframes=filtered_dfs),
                         self.create_equipment_distribution_figure(dataframes=filtered_dfs),
                         self.create_hourly_distribution_figure(dataframes=filtered_dfs, viz_type=viz_type),
                         self.create_heatmap_figure(dataframes=filtered_dfs, viz_type=viz_type),
+                        self.create_timeline_figure(dataframes=filtered_dfs),  # Importante: incluir este gráfico
                         [html.Li(alerta, className='alert alert-danger') for alerta in updated_insights.get('alertas_urgentes', [])]
                         if updated_insights.get('alertas_urgentes', []) else [html.P("No hay alertas urgentes en este momento", className='text-success')],
                         [html.Li(rec, className='mb-2') for rec in updated_insights.get('recomendaciones_predictivas', [])],
@@ -1815,7 +2200,7 @@ class DashboardGenerator:
                     # Mensaje para las recomendaciones y alertas
                     no_data_msg = [html.P("No hay datos para los filtros seleccionados", className='text-warning')]
                     
-                    return empty_fig, empty_fig, empty_fig, empty_fig, no_data_msg, no_data_msg, no_data_msg, no_data_msg
+                    return [empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, no_data_msg, no_data_msg, no_data_msg, no_data_msg]
                     
             except Exception as e:
                 logger.error(f"Error en callback de actualización: {str(e)}")
@@ -1834,14 +2219,15 @@ class DashboardGenerator:
                 
                 error_msg = [html.P(f"Error al procesar los datos: {str(e)}", className='text-danger')]
                 
-                return empty_fig, empty_fig, empty_fig, empty_fig, error_msg, error_msg, error_msg, error_msg
+                return [empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, error_msg, error_msg, error_msg, error_msg]
         
-        # Aplicar el decorador al callback AL FINAL
+        # Aplicar el decorador al callback
         self.app.callback(
             [Output('time-trend-graph', 'figure'),
             Output('equipment-distribution', 'figure'),
             Output('hourly-distribution', 'figure'),
             Output('heatmap', 'figure'),
+            Output('timeline-graph', 'figure'),  # Añadir este output
             Output('alertas-list', 'children'),
             Output('recomendaciones-predictivas-list', 'children'),
             Output('recomendaciones-preventivas-list', 'children'),
