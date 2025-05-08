@@ -226,19 +226,366 @@ class DashboardGenerator:
             logger.error(traceback.format_exc())
             return False
         
+        
+    def setup_improved_callbacks(self):
+        """Configurar callbacks adicionales para las nuevas funcionalidades"""
+        # Callback para los botones de selección rápida de fechas
+        @self.app.callback(
+            [Output('date-range-improved', 'start_date'),
+            Output('date-range-improved', 'end_date'),
+            Output('selected-period-info', 'children')],
+            [Input('btn-last-week', 'n_clicks'),
+            Input('btn-last-month', 'n_clicks'),
+            Input('btn-last-quarter', 'n_clicks'),
+            Input('btn-all-time', 'n_clicks')],
+            [State('date-range-improved', 'start_date'),
+            State('date-range-improved', 'end_date')]
+        )
+        def update_date_range(week_clicks, month_clicks, quarter_clicks, all_clicks, current_start, current_end):
+            ctx = callback_context
+            
+            if not ctx.triggered:
+                # No hay clicks, mantener valores actuales
+                period_text = f"Periodo seleccionado: {current_start} a {current_end}"
+                return current_start, current_end, period_text
+            
+            # Determinar qué botón se presionó
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            
+            today = datetime.now().date()
+            
+            if button_id == 'btn-last-week':
+                start_date = today - timedelta(days=7)
+                end_date = today
+                period_text = "Periodo seleccionado: Última semana"
+            elif button_id == 'btn-last-month':
+                start_date = today - timedelta(days=30)
+                end_date = today
+                period_text = "Periodo seleccionado: Último mes"
+            elif button_id == 'btn-last-quarter':
+                start_date = today - timedelta(days=90)
+                end_date = today
+                period_text = "Periodo seleccionado: Último trimestre"
+            elif button_id == 'btn-all-time':
+                start_date = self.get_min_date()
+                end_date = self.get_max_date()
+                period_text = "Periodo seleccionado: Todo el rango disponible"
+            else:
+                # Mantener fechas actuales si hay algún error
+                start_date = current_start
+                end_date = current_end
+                period_text = f"Periodo seleccionado: {start_date} a {end_date}"
+            
+            return start_date, end_date, period_text
+        
+        # Callback para mostrar contenido basado en la pestaña seleccionada
+        @self.app.callback(
+            Output('tabs-content', 'children'),
+            Input('analysis-tabs', 'value')
+        )
+        def render_tab_content(selected_tab):
+            if selected_tab == 'tab-general':
+                return html.Div([
+                    html.H3("Visión General del Sistema", className="mb-4"),
+                    html.Div(className="row", children=[
+                        # Gráficos y KPIs de visión general
+                        html.Div(className="col-md-6", children=[
+                            dcc.Graph(id='time-trend-graph-tab', figure=self.create_time_trend_figure())
+                        ]),
+                        html.Div(className="col-md-6", children=[
+                            dcc.Graph(id='equipment-distribution-tab', figure=self.create_equipment_distribution_figure())
+                        ])
+                    ])
+                ])
+            elif selected_tab == 'tab-predictive':
+                return html.Div([
+                    html.H3("Análisis Predictivo", className="mb-4"),
+                    # Gráfico predictivo
+                    dcc.Graph(id='forecast-trend-graph-tab', figure=self.create_forecast_trend_graph())
+                ])
+            elif selected_tab == 'tab-failures':
+                return html.Div([
+                    html.H3("Análisis de Fallos", className="mb-4"),
+                    # Contenido para análisis de fallos
+                    dcc.Graph(id='degradation-pattern-analysis-tab', figure=self.create_degradation_pattern_analysis())
+                ])
+            elif selected_tab == 'tab-maintenance':
+                return html.Div([
+                    html.H3("Planificación de Mantenimiento", className="mb-4"),
+                    # Recomendaciones de mantenimiento
+                    html.Div(className="alert alert-primary", children=[
+                        html.H5("Recomendaciones de Mantenimiento", className="alert-heading"),
+                        html.Hr(),
+                        html.Ul([
+                            html.Li(rec) for rec in self.insights.get('recomendaciones_predictivas', [])
+                        ])
+                    ])
+                ])
+        
+        # Callback para actualizar el gráfico predictivo basado en la selección de ADV
+        @self.app.callback(
+            Output('forecast-trend-graph', 'figure'),
+            Input('btn-analyze-adv', 'n_clicks'),
+            [State('adv-selector', 'value'),
+            State('adv-comparison', 'value')]
+        )
+        def update_forecast_graph(n_clicks, selected_adv, comparison_advs):
+            if not n_clicks:
+                return self.create_forecast_trend_graph()
+                
+            if not selected_adv:
+                return self.create_forecast_trend_graph()
+            
+            # Combinar ADV principal con los de comparación
+            all_advs = [selected_adv] + (comparison_advs if comparison_advs else [])
+            
+            # Crear gráfico con todos los ADVs seleccionados
+            return self.create_forecast_trend_graph(equipment_ids=all_advs)
+        
+        # Callback para mostrar detalles del ADV seleccionado
+        @self.app.callback(
+            Output('adv-details', 'children'),
+            Input('adv-selector', 'value')
+        )
+        def show_adv_details(selected_adv):
+            if not selected_adv:
+                return "Seleccione un aparato de vía para ver detalles"
+            
+            # Obtener datos del ADV seleccionado
+            if self.analysis_type == "ADV" and 'movimientos' in self.dataframes:
+                df = self.dataframes['movimientos']
+                adv_stats = {}
+                
+                # Filtrar para el ADV seleccionado
+                if 'Equipo' in df.columns and selected_adv in df['Equipo'].unique():
+                    adv_df = df[df['Equipo'] == selected_adv]
+                    
+                    # Calcular estadísticas
+                    if 'Duración (s)' in adv_df.columns:
+                        adv_stats['duracion_media'] = adv_df['Duración (s)'].mean()
+                        adv_stats['duracion_max'] = adv_df['Duración (s)'].max()
+                        adv_stats['total_movimientos'] = len(adv_df)
+                        
+                        # Contar anomalías si existe la columna
+                        if 'Anomalía' in adv_df.columns:
+                            adv_stats['anomalias'] = adv_df['Anomalía'].sum()
+                            adv_stats['pct_anomalias'] = 100 * adv_stats['anomalias'] / adv_stats['total_movimientos']
+                    
+                    # Contar discordancias
+                    if 'discordancias' in self.dataframes:
+                        disc_df = self.dataframes['discordancias']
+                        if 'Equipo' in disc_df.columns and selected_adv in disc_df['Equipo'].unique():
+                            adv_stats['total_discordancias'] = sum(disc_df['Equipo'] == selected_adv)
+                    
+                    # Determinar estado general
+                    if adv_stats.get('pct_anomalias', 0) > 20 or adv_stats.get('total_discordancias', 0) > 5:
+                        estado = "CRÍTICO"
+                        color = "red"
+                    elif adv_stats.get('pct_anomalias', 0) > 10 or adv_stats.get('total_discordancias', 0) > 2:
+                        estado = "ALERTA"
+                        color = "orange"
+                    elif adv_stats.get('pct_anomalias', 0) > 5 or adv_stats.get('total_discordancias', 0) > 0:
+                        estado = "ATENCIÓN"
+                        color = "blue"
+                    else:
+                        estado = "NORMAL"
+                        color = "green"
+                    
+                    # Crear resumen HTML
+                    return html.Div([
+                        html.H5(f"Detalles de {selected_adv}", className="mb-3"),
+                        html.Div(className="row", children=[
+                            html.Div(className="col-md-6", children=[
+                                html.P([
+                                    html.Strong("Total movimientos: "), 
+                                    f"{adv_stats.get('total_movimientos', 'N/A')}"
+                                ]),
+                                html.P([
+                                    html.Strong("Duración media: "), 
+                                    f"{adv_stats.get('duracion_media', 0):.2f} s"
+                                ]),
+                                html.P([
+                                    html.Strong("Duración máxima: "), 
+                                    f"{adv_stats.get('duracion_max', 0):.2f} s"
+                                ])
+                            ]),
+                            html.Div(className="col-md-6", children=[
+                                html.P([
+                                    html.Strong("Anomalías: "), 
+                                    f"{adv_stats.get('anomalias', 0)} ({adv_stats.get('pct_anomalias', 0):.1f}%)"
+                                ]),
+                                html.P([
+                                    html.Strong("Discordancias: "), 
+                                    f"{adv_stats.get('total_discordancias', 0)}"
+                                ]),
+                                html.P([
+                                    html.Strong("Estado: "), 
+                                    html.Span(estado, style={"color": color, "fontWeight": "bold"})
+                                ])
+                            ])
+                        ])
+                    ])
+                
+            return html.Div([
+                html.P("No hay datos disponibles para este aparato de vía", className="text-muted")
+            ])
+        
+        # Callback para actualizar los indicadores de estado tipo semáforo
+        @self.app.callback(
+            Output('status-indicators', 'children'),
+            Input('apply-filters-button', 'n_clicks'),
+            [State('date-range', 'start_date'),
+            State('date-range', 'end_date'),
+            State('equipment-filter', 'value')]
+        )
+        def update_status_indicators(n_clicks, start_date, end_date, selected_equipments):
+            """Callback para actualizar los indicadores de estado"""
+            # Obtener datos de equipos según el tipo de análisis
+            equipment_data = {}
+            
+            if self.analysis_type == "ADV":
+                # Para ADV usamos las métricas de confiabilidad
+                if hasattr(self, 'reliability_metrics') and 'discordancias' in self.reliability_metrics:
+                    equipment_data = self.reliability_metrics['discordancias']
+                else:
+                    # Si no hay métricas calculadas, generarlas a partir de los datos
+                    try:
+                        if 'movimientos' in self.dataframes and not self.dataframes['movimientos'].empty:
+                            df = self.dataframes['movimientos']
+                            
+                            # Filtrar si se han seleccionado fechas
+                            if start_date and end_date:
+                                start_date = pd.to_datetime(start_date)
+                                end_date = pd.to_datetime(end_date)
+                                if 'Fecha' in df.columns:
+                                    df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
+                                    df = df[(df['Fecha'] >= start_date) & (df['Fecha'] <= end_date)]
+                            
+                            # Filtrar por equipos seleccionados
+                            if selected_equipments and len(selected_equipments) > 0:
+                                df = df[df['Equipo'].isin(selected_equipments)]
+                            
+                            # Agrupar por equipo para calcular métricas
+                            for equipo in df['Equipo'].unique():
+                                equip_df = df[df['Equipo'] == equipo]
+                                
+                                # Contar anomalías
+                                anomalias = 0
+                                if 'Anomalía' in equip_df.columns:
+                                    anomalias = equip_df['Anomalía'].sum()
+                                
+                                # Calcular urgencia basada en anomalías
+                                pct_anomalias = 100 * anomalias / len(equip_df) if len(equip_df) > 0 else 0
+                                urgencia = min(1.0, pct_anomalias / 100)
+                                
+                                # Fecha del último movimiento
+                                ultima_fecha = None
+                                dias_desde_ultimo = 0
+                                if 'Fecha' in equip_df.columns:
+                                    ultima_fecha = equip_df['Fecha'].max()
+                                    dias_desde_ultimo = (datetime.now() - ultima_fecha).days
+                                
+                                equipment_data[equipo] = {
+                                    'total_failures': anomalias,
+                                    'recent_failures': anomalias,
+                                    'last_failure_date': ultima_fecha if ultima_fecha else datetime.now(),
+                                    'days_since_last_failure': dias_desde_ultimo,
+                                    'maintenance_urgency': urgencia
+                                }
+                    except Exception as e:
+                        logger.error(f"Error calculando métricas para indicadores: {str(e)}")
+                        pass
+            
+            elif self.analysis_type == "CDV":
+                # Para CDV usamos las métricas de los fallos de ocupación
+                if hasattr(self, 'reliability_metrics') and 'fallos_ocupacion' in self.reliability_metrics:
+                    equipment_data = self.reliability_metrics['fallos_ocupacion']
+            
+            # Crear indicadores para cada equipo
+            indicators = []
+            
+            for i, (equip, data) in enumerate(equipment_data.items()):
+                # Determinar estado basado en métricas (limitamos a los primeros 12 equipos)
+                if i >= 12:
+                    break
+                    
+                if data['maintenance_urgency'] > 0.7:
+                    status_color = '#E74C3C'  # Rojo
+                    status_text = 'CRÍTICO'
+                    status_icon = '❌'
+                elif data['maintenance_urgency'] > 0.4:
+                    status_color = '#F39C12'  # Amarillo
+                    status_text = 'ALERTA'
+                    status_icon = '⚠️'
+                elif data['maintenance_urgency'] > 0.2:
+                    status_color = '#3498DB'  # Azul
+                    status_text = 'VIGILANCIA'
+                    status_icon = 'ℹ️'
+                else:
+                    status_color = '#2ECC71'  # Verde
+                    status_text = 'NORMAL'
+                    status_icon = '✅'
+                    
+                # Crear tarjeta de equipo con indicador de estado
+                indicators.append(
+                    html.Div(className='col-md-3 col-sm-6 mb-3', children=[
+                        html.Div(className='card h-100 border-0 shadow-sm', children=[
+                            # Cabecera con estado
+                            html.Div(className='card-header text-white', 
+                                    style={'backgroundColor': status_color, 'borderRadius': '5px 5px 0 0'},
+                                    children=[
+                                        html.Div(className='d-flex justify-content-between align-items-center', children=[
+                                            html.H5(equip, className='mb-0 text-truncate', 
+                                                style={'maxWidth': '85%', 'fontWeight': 'bold'}),
+                                            html.Span(status_icon, style={'fontSize': '1.5rem'})
+                                        ])
+                                    ]),
+                            # Cuerpo con métricas clave
+                            html.Div(className='card-body', children=[
+                                html.Div(className='d-flex flex-column', children=[
+                                    html.P([
+                                        html.Strong("Estado: "),
+                                        html.Span(status_text, style={'color': status_color, 'fontWeight': 'bold'})
+                                    ], className='mb-1'),
+                                    html.P([
+                                        html.Strong("Urgencia: "),
+                                        html.Span(f"{data['maintenance_urgency']*100:.1f}%")
+                                    ], className='mb-1'),
+                                    html.P([
+                                        html.Strong("Último fallo: "),
+                                        html.Span(f"Hace {int(data['days_since_last_failure'])} días")
+                                    ], className='mb-1')
+                                ])
+                            ]),
+                            # Footer con acción
+                            html.Div(className='card-footer bg-transparent', children=[
+                                html.Button('Ver detalles', 
+                                        id={'type': 'btn-equip-details', 'index': equip},
+                                        className='btn btn-sm w-100', 
+                                        style={'backgroundColor': status_color, 'color': 'white'})
+                            ])
+                        ])
+                    ])
+                )
+            
+            # Si no hay datos, mostrar mensaje informativo
+            if not indicators:
+                return html.Div(className="alert alert-info", children=[
+                    "No hay datos de estado disponibles para los equipos con los filtros actuales."
+                ])
+            
+            # Retornar contenedor con todos los indicadores
+            return indicators
+        
 ##############################################################################################################
 
-    def create_forecast_trend_graph(self, dataframes=None, equipment_id=None, days_ahead=30):
-        """Crear gráfico con proyección de tendencia futura para un equipo"""
+    def create_forecast_trend_graph(self, dataframes=None, equipment_ids=None, days_ahead=30):
+        """Crear gráfico con proyección de tendencia futura para uno o varios equipos"""
         # Usar dataframes filtrados si se proporcionan
         dfs = dataframes if dataframes else self.dataframes
         
         # Seleccionar datos relevantes según tipo de análisis
-        if self.analysis_type == "CDV" and 'fallos_ocupacion' in dfs:
-            df = dfs['fallos_ocupacion'].copy()
-            date_col = 'Fecha Hora'
-            equipment_col = 'Equipo'
-        elif self.analysis_type == "ADV" and 'movimientos' in dfs:
+        if self.analysis_type == "ADV" and 'movimientos' in dfs:
             df = dfs['movimientos'].copy()
             date_col = 'Fecha'
             equipment_col = 'Equipo'
@@ -253,87 +600,137 @@ class DashboardGenerator:
             )
             return fig
         
-        # Si se especificó un equipo, filtrar para ese equipo
-        if equipment_id and equipment_id in df[equipment_col].unique():
-            df = df[df[equipment_col] == equipment_id]
-        else:
-            # Si no hay equipo específico, tomar el de mayor frecuencia
-            top_equipment = df[equipment_col].value_counts().idxmax()
-            df = df[df[equipment_col] == top_equipment]
-            equipment_id = top_equipment
-        
-        # Preparar datos para análisis de tendencia
-        df['date'] = pd.to_datetime(df[date_col]).dt.date
-        counts_by_day = df.groupby('date').size().reset_index(name='count')
-        counts_by_day['date'] = pd.to_datetime(counts_by_day['date'])
-        
-        # Crear serie temporal completa
-        date_range = pd.date_range(
-            start=counts_by_day['date'].min(), 
-            end=counts_by_day['date'].max()
-        )
-        
-        time_series = pd.DataFrame({'date': date_range})
-        time_series = time_series.merge(counts_by_day, on='date', how='left')
-        time_series['count'] = time_series['count'].fillna(0)
-        
-        # Preparar datos para el modelo
-        X = np.array(range(len(time_series))).reshape(-1, 1)
-        y = time_series['count'].values
-        
-        # Ajustar modelo de regresión
-        model = LinearRegression()
-        model.fit(X, y)
-        
-        # Calcular tendencia futura
-        future_days = days_ahead
-        X_future = np.array(range(len(time_series), len(time_series) + future_days)).reshape(-1, 1)
-        future_dates = [time_series['date'].max() + timedelta(days=i+1) for i in range(future_days)]
-        forecast = model.predict(X_future)
-        forecast = np.maximum(forecast, 0)  # No permitir valores negativos
-        
-        # Crear figura
+        # Crear figura base
         fig = go.Figure()
         
-        # Datos históricos
-        fig.add_trace(go.Scatter(
-            x=time_series['date'],
-            y=time_series['count'],
-            mode='lines+markers',
-            name='Datos históricos',
-            line=dict(color='blue')
-        ))
+        # Colores para distinguir diferentes equipos
+        colors = ['blue', 'red', 'green', 'purple', 'orange', 'teal', 'magenta', 'brown', 'pink', 'grey']
         
-        # Línea de tendencia pasada
-        fig.add_trace(go.Scatter(
-            x=time_series['date'],
-            y=model.predict(X),
-            mode='lines',
-            name='Tendencia histórica',
-            line=dict(color='green', dash='dash')
-        ))
+        # Lista de equipos a analizar (principal y comparativos)
+        if not equipment_ids:
+            # Si no se especificó un equipo, tomar el de mayor frecuencia
+            top_equipment = df[equipment_col].value_counts().idxmax()
+            equipment_ids = [top_equipment]
         
-        # Proyección futura
-        fig.add_trace(go.Scatter(
-            x=future_dates,
-            y=forecast,
-            mode='lines',
-            name='Proyección futura',
-            line=dict(color='red', dash='dash')
-        ))
-        
-        # Añadir región sombreada para la proyección
-        fig.add_vrect(
-            x0=time_series['date'].max(),
-            x1=future_dates[-1],
-            fillcolor="rgba(255, 0, 0, 0.1)",
-            layer="below",
-            line_width=0,
-        )
+        # Procesar cada equipo seleccionado
+        for i, equipment_id in enumerate(equipment_ids):
+            if equipment_id in df[equipment_col].unique():
+                # Filtrar para este equipo
+                equip_df = df[df[equipment_col] == equipment_id]
+                
+                # Preparar datos para análisis de tendencia
+                equip_df['date'] = pd.to_datetime(equip_df[date_col]).dt.date
+                counts_by_day = equip_df.groupby('date').size().reset_index(name='count')
+                counts_by_day['date'] = pd.to_datetime(counts_by_day['date'])
+                
+                # Crear serie temporal completa
+                date_range = pd.date_range(
+                    start=counts_by_day['date'].min(), 
+                    end=counts_by_day['date'].max()
+                )
+                
+                time_series = pd.DataFrame({'date': date_range})
+                time_series = time_series.merge(counts_by_day, on='date', how='left')
+                time_series['count'] = time_series['count'].fillna(0)
+                
+                # Preparar datos para el modelo
+                X = np.array(range(len(time_series))).reshape(-1, 1)
+                y = time_series['count'].values
+                
+                # Ajustar modelo de regresión
+                model = LinearRegression()
+                model.fit(X, y)
+                
+                # Calcular tendencia futura
+                future_days = days_ahead
+                X_future = np.array(range(len(time_series), len(time_series) + future_days)).reshape(-1, 1)
+                future_dates = [time_series['date'].max() + timedelta(days=i+1) for i in range(future_days)]
+                forecast = model.predict(X_future)
+                forecast = np.maximum(forecast, 0)  # No permitir valores negativos
+                
+                # Calcular métricas para la anotación
+                slope = model.coef_[0]
+                slope_percentage = slope / time_series['count'].mean() * 100 if time_series['count'].mean() > 0 else 0
+                
+                # Determinar estado
+                if slope_percentage < -5:
+                    status = "Mejorando"
+                    color = "green"
+                elif slope_percentage < 2:
+                    status = "Estable"
+                    color = "blue"
+                elif slope_percentage < 10:
+                    status = "Degradación Leve"
+                    color = "orange"
+                else:
+                    status = "Degradación Severa"
+                    color = "red"
+                
+                # Color para este equipo
+                equip_color = colors[i % len(colors)]
+                
+                # Añadir datos históricos
+                fig.add_trace(go.Scatter(
+                    x=time_series['date'],
+                    y=time_series['count'],
+                    mode='lines+markers',
+                    name=f'Datos históricos - {equipment_id}',
+                    line=dict(color=equip_color),
+                    legendgroup=equipment_id
+                ))
+                
+                # Línea de tendencia histórica
+                fig.add_trace(go.Scatter(
+                    x=time_series['date'],
+                    y=model.predict(X),
+                    mode='lines',
+                    name=f'Tendencia - {equipment_id}',
+                    line=dict(color=equip_color, dash='dash'),
+                    legendgroup=equipment_id
+                ))
+                
+                # Al añadir la proyección futura, incluir bandas de confianza
+                if i == 0:  # Para el equipo principal
+                    # Calcular bandas de confianza (95%)
+                    confidence = 1.96 * np.std(y - model.predict(X).flatten())
+                    upper_bound = forecast + confidence
+                    lower_bound = np.maximum(forecast - confidence, 0)  # No permitir valores negativos
+                    
+                    # Añadir la proyección con bandas de confianza
+                    fig.add_trace(go.Scatter(
+                        x=future_dates,
+                        y=forecast,
+                        mode='lines',
+                        name=f'Proyección - {equipment_id}',
+                        line=dict(color='red', dash='dash'),
+                        legendgroup=equipment_id
+                    ))
+                    
+                    # Añadir banda superior
+                    fig.add_trace(go.Scatter(
+                        x=future_dates,
+                        y=upper_bound,
+                        mode='lines',
+                        line=dict(width=0),
+                        showlegend=False,
+                        legendgroup=equipment_id
+                    ))
+                    
+                    # Añadir banda inferior
+                    fig.add_trace(go.Scatter(
+                        x=future_dates,
+                        y=lower_bound,
+                        mode='lines',
+                        line=dict(width=0),
+                        fill='tonexty',
+                        fillcolor='rgba(255,0,0,0.2)',
+                        showlegend=False,
+                        legendgroup=equipment_id
+                    ))
         
         # Configuración del gráfico
         fig.update_layout(
-            title=f"Análisis Predictivo - {equipment_id}",
+            title=f"Análisis Predictivo - {equipment_ids[0]}" + (f" y {len(equipment_ids)-1} más" if len(equipment_ids) > 1 else ""),
             xaxis_title="Fecha",
             yaxis_title="Frecuencia de Eventos",
             plot_bgcolor='white',
@@ -347,37 +744,6 @@ class DashboardGenerator:
                 xanchor="right",
                 x=1
             )
-        )
-        
-        # Añadir anotación con métricas predictivas
-        slope = model.coef_[0]
-        slope_percentage = slope / time_series['count'].mean() * 100 if time_series['count'].mean() > 0 else 0
-        
-        status = "Estable"
-        color = "green"
-        if slope_percentage > 10:
-            status = "Degradación Severa"
-            color = "red"
-        elif slope_percentage > 5:
-            status = "Degradación Moderada"
-            color = "orange"
-        elif slope_percentage > 2:
-            status = "Degradación Leve"
-            color = "blue"
-        
-        fig.add_annotation(
-            x=0.02,
-            y=0.98,
-            xref="paper",
-            yref="paper",
-            text=f"Estado: <b>{status}</b><br>Tasa de cambio: {slope_percentage:.2f}% por día<br>Eventos proyectados (30 días): {round(forecast.sum())}",
-            showarrow=False,
-            font=dict(color=color),
-            align="left",
-            bgcolor="white",
-            bordercolor=color,
-            borderwidth=2,
-            borderpad=4
         )
         
         return fig
@@ -525,7 +891,7 @@ class DashboardGenerator:
                 font=dict(color=row['Color'])
             )
         
-        # Añadir zonas de riesgo como regiones rectangulares
+    # Añadir zonas de riesgo más definidas
         # Zona de alto riesgo (cuadrante superior derecho)
         fig.add_shape(
             type="rect",
@@ -538,13 +904,73 @@ class DashboardGenerator:
             layer="below"
         )
         
-        # Añadir etiqueta para zona de alto riesgo
+        # Zona de riesgo medio (parte central)
+        fig.add_shape(
+            type="rect",
+            x0=metrics_df['Frecuencia'].max() * 0.3,
+            y0=metrics_df['Tendencia'].min() * 0.5,
+            x1=metrics_df['Frecuencia'].max() * 0.6,
+            y1=0,
+            line=dict(width=0),
+            fillcolor="rgba(255,165,0,0.1)",
+            layer="below"
+        )
+        
+        # Zona de riesgo bajo (cuadrante inferior izquierdo)
+        fig.add_shape(
+            type="rect",
+            x0=0,
+            y0=metrics_df['Tendencia'].min() * 1.1,
+            x1=metrics_df['Frecuencia'].max() * 0.3,
+            y1=metrics_df['Tendencia'].min() * 0.5,
+            line=dict(width=0),
+            fillcolor="rgba(0,255,0,0.1)",
+            layer="below"
+        )
+        
+        # Añadir leyendas para las zonas
         fig.add_annotation(
             x=metrics_df['Frecuencia'].max() * 0.8,
             y=metrics_df['Tendencia'].max() * 0.8,
             text="ZONA DE ALTO RIESGO",
             showarrow=False,
-            font=dict(color="red", size=12)
+            font=dict(color="red", size=12, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.7)"
+        )
+        
+        fig.add_annotation(
+            x=metrics_df['Frecuencia'].max() * 0.4,
+            y=metrics_df['Tendencia'].min() * 0.25,
+            text="ZONA DE RIESGO MEDIO",
+            showarrow=False,
+            font=dict(color="orange", size=12),
+            bgcolor="rgba(255,255,255,0.7)"
+        )
+        
+        fig.add_annotation(
+            x=metrics_df['Frecuencia'].max() * 0.15,
+            y=metrics_df['Tendencia'].min() * 0.8,
+            text="ZONA DE BAJO RIESGO",
+            showarrow=False,
+            font=dict(color="green", size=12),
+            bgcolor="rgba(255,255,255,0.7)"
+        )
+        
+        # Añadir texto explicativo
+        fig.add_annotation(
+            x=0.5,
+            y=-0.15,
+            xref="paper",
+            yref="paper",
+            text="MATRIZ DE DECISIÓN: Los aparatos en zona roja requieren intervención inmediata. " + 
+                "Los de zona naranja necesitan monitoreo constante. Los de zona verde están en estado óptimo.",
+            showarrow=False,
+            align="center",
+            font=dict(size=10, color="black"),
+            bordercolor="black",
+            borderwidth=1,
+            borderpad=4,
+            bgcolor="white"
         )
         
         # Configurar layout
@@ -868,7 +1294,474 @@ class DashboardGenerator:
             import traceback
             logger.error(traceback.format_exc())
             return self._create_empty_figure(f"Error en análisis de patrones: {str(e)}")
+        
+        
+    def create_improved_date_selectors(self):
+        """Crear selectores de fecha mejorados con opciones rápidas"""
+        return html.Div(className='card mb-3', children=[
+            html.Div(className='card-header bg-primary text-white', children=[
+                html.H5("Periodo de Análisis", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                html.Div(className='row align-items-center', children=[
+                    # Columna para selector de rango
+                    html.Div(className='col-md-6', children=[
+                        html.Label("Rango de Fechas:", className='form-label fw-bold'),
+                        dcc.DatePickerRange(
+                            id='date-range-improved',
+                            min_date_allowed=self.get_min_date(),
+                            max_date_allowed=self.get_max_date(),
+                            start_date=self.get_min_date(),
+                            end_date=self.get_max_date(),
+                            display_format='DD/MM/YYYY',
+                            className='w-100'
+                        ),
+                    ]),
+                    # Columna para botones de acceso rápido
+                    html.Div(className='col-md-6', children=[
+                        html.Label("Selección rápida:", className='form-label fw-bold d-block'),
+                        html.Div(className='btn-group w-100', children=[
+                            html.Button('Última semana', id='btn-last-week', n_clicks=0, 
+                                    className='btn btn-outline-secondary'),
+                            html.Button('Último mes', id='btn-last-month', n_clicks=0, 
+                                    className='btn btn-outline-secondary'),
+                            html.Button('Último trimestre', id='btn-last-quarter', n_clicks=0, 
+                                    className='btn btn-outline-secondary'),
+                            html.Button('Todo', id='btn-all-time', n_clicks=0, 
+                                    className='btn btn-outline-secondary')
+                        ])
+                    ])
+                ]),
+                # Fila para mostrar periodo seleccionado
+                html.Div(className='mt-3', children=[
+                    html.Div(id='selected-period-info', className='alert alert-info py-2', children=[
+                        "Periodo seleccionado: Todo el rango disponible"
+                    ])
+                ])
+            ])
+        ])
+        
+        
+    def create_analysis_tabs(self):
+        """Crear tabs para diferentes tipos de análisis"""
+        return html.Div(className='mt-4', children=[
+            dcc.Tabs(id='analysis-tabs', value='tab-general', className='mb-3', children=[
+                dcc.Tab(label='Visión General', value='tab-general', className='font-weight-bold',
+                    style={'padding': '10px', 'fontWeight': 'bold'},
+                    selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                dcc.Tab(label='Análisis Predictivo', value='tab-predictive', className='font-weight-bold',
+                    style={'padding': '10px', 'fontWeight': 'bold'},
+                    selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                dcc.Tab(label='Análisis de Fallos', value='tab-failures', className='font-weight-bold',
+                    style={'padding': '10px', 'fontWeight': 'bold'},
+                    selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                dcc.Tab(label='Mantenimiento', value='tab-maintenance', className='font-weight-bold',
+                    style={'padding': '10px', 'fontWeight': 'bold'},
+                    selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'})
+            ]),
+            
+            # Contenido de cada tab
+            html.Div(id='tabs-content', className='p-3 border rounded bg-white')
+        ])
+        
+    def create_status_indicators(self, equipment_data):
+        """Crear indicadores tipo semáforo para estados críticos"""
+        indicators = []
+        
+        for equip, data in equipment_data.items():
+            # Determinar estado basado en métricas
+            if data['maintenance_urgency'] > 0.7:
+                status_color = '#E74C3C'  # Rojo
+                status_text = 'CRÍTICO'
+                status_icon = '❌'
+            elif data['maintenance_urgency'] > 0.4:
+                status_color = '#F39C12'  # Amarillo
+                status_text = 'ALERTA'
+                status_icon = '⚠️'
+            elif data['maintenance_urgency'] > 0.2:
+                status_color = '#3498DB'  # Azul
+                status_text = 'VIGILANCIA'
+                status_icon = 'ℹ️'
+            else:
+                status_color = '#2ECC71'  # Verde
+                status_text = 'NORMAL'
+                status_icon = '✅'
+                
+            # Crear tarjeta de equipo con indicador de estado
+            indicators.append(
+                html.Div(className='col-md-3 col-sm-6 mb-3', children=[
+                    html.Div(className='card h-100 border-0 shadow-sm', children=[
+                        # Cabecera con estado
+                        html.Div(className='card-header text-white', 
+                                style={'backgroundColor': status_color, 'borderRadius': '5px 5px 0 0'},
+                                children=[
+                                    html.Div(className='d-flex justify-content-between align-items-center', children=[
+                                        html.H5(equip, className='mb-0 text-truncate', 
+                                            style={'maxWidth': '85%', 'fontWeight': 'bold'}),
+                                        html.Span(status_icon, style={'fontSize': '1.5rem'})
+                                    ])
+                                ]),
+                        # Cuerpo con métricas clave
+                        html.Div(className='card-body', children=[
+                            html.Div(className='d-flex flex-column', children=[
+                                html.P([
+                                    html.Strong("Estado: "),
+                                    html.Span(status_text, style={'color': status_color, 'fontWeight': 'bold'})
+                                ], className='mb-1'),
+                                html.P([
+                                    html.Strong("Urgencia: "),
+                                    html.Span(f"{data['maintenance_urgency']*100:.1f}%")
+                                ], className='mb-1'),
+                                html.P([
+                                    html.Strong("Último fallo: "),
+                                    html.Span(f"Hace {int(data['days_since_last_failure'])} días")
+                                ], className='mb-1')
+                            ])
+                        ]),
+                        # Footer con acción
+                        html.Div(className='card-footer bg-transparent', children=[
+                            html.Button('Ver detalles', 
+                                    id={'type': 'btn-equip-details', 'index': equip},
+                                    className='btn btn-sm w-100', 
+                                    style={'backgroundColor': status_color, 'color': 'white'})
+                        ])
+                    ])
+                ])
+            )
+        
+        # Retornar contenedor con todos los indicadores
+        return html.Div(className='row', children=indicators)
+    
+    
+    def create_adv_selector_and_comparison(self):
+        """Crear selector de ADV específico y herramientas de comparación"""
+        # Obtener lista de ADVs disponibles
+        advs = self.get_equipment_list()
+        
+        return html.Div(className='card mb-4', children=[
+            html.Div(className='card-header bg-secondary text-white', children=[
+                html.H5("Selección y Comparación de Aparatos de Vía", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                html.Div(className='row', children=[
+                    # Selector de ADV principal
+                    html.Div(className='col-md-5', children=[
+                        html.Label("Seleccionar aparato de vía para análisis:", className='form-label fw-bold'),
+                        dcc.Dropdown(
+                            id='adv-selector',
+                            options=[{'label': adv, 'value': adv} for adv in advs],
+                            value=advs[0] if advs else None,
+                            placeholder="Seleccione un aparato de vía",
+                            className='mb-3'
+                        ),
+                        # Mostrar detalles del ADV seleccionado
+                        html.Div(id='adv-details', className='alert alert-light')
+                    ]),
+                    
+                    # Comparación con otros ADVs
+                    html.Div(className='col-md-7', children=[
+                        html.Label("Comparar con otros aparatos de vía:", className='form-label fw-bold'),
+                        dcc.Dropdown(
+                            id='adv-comparison',
+                            options=[{'label': adv, 'value': adv} for adv in advs],
+                            value=[],
+                            multi=True,
+                            placeholder="Seleccione ADVs para comparar",
+                            className='mb-3'
+                        ),
+                        # Métricas para comparación
+                        html.Div(className='d-flex justify-content-start', children=[
+                            html.Div(className='form-check form-check-inline', children=[
+                                dcc.Checklist(
+                                    id='compare-metrics',
+                                    options=[
+                                        {'label': ' Tiempos de movimiento', 'value': 'mov_time'},
+                                        {'label': ' Frecuencia de discordancias', 'value': 'disc_freq'},
+                                        {'label': ' Tendencia de degradación', 'value': 'degrad_trend'}
+                                    ],
+                                    value=['mov_time'],
+                                    labelStyle={'display': 'block', 'marginBottom': '5px'}
+                                )
+                            ])
+                        ])
+                    ])
+                ]),
+                
+                # Botón de acción
+                html.Div(className='text-center mt-3', children=[
+                    html.Button('Analizar', id='btn-analyze-adv', className='btn btn-primary px-4',
+                            style={'fontWeight': 'bold'})
+                ])
+            ])
+        ])
+        
+        
+    # Añadir un panel para umbrales de intervención
+    def create_intervention_thresholds_panel(self):
+        return html.Div(className='card mb-4', children=[
+            html.Div(className='card-header bg-primary text-white', children=[
+                html.H5("Umbrales de Intervención", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                html.Div(className='row', children=[
+                    # Configuración de umbrales
+                    html.Div(className='col-md-6', children=[
+                        html.Label("Umbral crítico (eventos/día):", className='form-label fw-bold'),
+                        dcc.Input(
+                            id='threshold-critical',
+                            type='number',
+                            min=1,
+                            max=1000,
+                            value=15,
+                            className='form-control mb-3'
+                        ),
+                        html.Label("Umbral de alerta (eventos/día):", className='form-label fw-bold'),
+                        dcc.Input(
+                            id='threshold-warning',
+                            type='number',
+                            min=1,
+                            max=500,
+                            value=10,
+                            className='form-control mb-3'
+                        )
+                    ]),
+                    
+                    # Plan de intervención automático
+                    html.Div(className='col-md-6', children=[
+                        html.Label("Programar intervención automática:", className='form-label fw-bold'),
+                        dcc.Dropdown(
+                            id='auto-intervention',
+                            options=[
+                                {'label': 'Al cruzar umbral crítico', 'value': 'critical'},
+                                {'label': 'Al predecir cruce de umbral', 'value': 'predictive'},
+                                {'label': 'Manual solamente', 'value': 'manual'}
+                            ],
+                            value='predictive',
+                            className='mb-3'
+                        ),
+                        html.Div(id='intervention-recommendation', className='alert alert-warning')
+                    ])
+                ])
+            ])
+        ])
 
+    def create_causal_factors_analysis(self, equipment_id):
+        """Crear análisis de factores causales para un aparato seleccionado"""
+        factors = [
+            {'name': 'Temperatura ambiente', 'correlation': 0.75, 'impact': 'Alto'},
+            {'name': 'Carga de pasajeros', 'correlation': 0.62, 'impact': 'Medio'},
+            {'name': 'Velocidad de operación', 'correlation': 0.58, 'impact': 'Medio'},
+            {'name': 'Humedad', 'correlation': 0.43, 'impact': 'Bajo'},
+            {'name': 'Horas desde mantenimiento', 'correlation': 0.85, 'impact': 'Crítico'}
+        ]
+        
+        # Ordenar por correlación descendente
+        factors.sort(key=lambda x: x['correlation'], reverse=True)
+        
+        # Crear tabla de factores
+        return html.Div(className='card mb-4', children=[
+            html.Div(className='card-header bg-info text-white', children=[
+                html.H5(f"Análisis Causal para {equipment_id}", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                # Tabla de factores
+                html.Div(className='table-responsive', children=[
+                    html.Table(className='table table-hover', children=[
+                        html.Thead(html.Tr([
+                            html.Th("Factor"),
+                            html.Th("Correlación"),
+                            html.Th("Impacto"),
+                            html.Th("Acción recomendada")
+                        ])),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(factor['name']),
+                                html.Td([
+                                    html.Div(className='progress', children=[
+                                        html.Div(
+                                            className='progress-bar',
+                                            style={
+                                                'width': f"{factor['correlation']*100}%",
+                                                'backgroundColor': '#E74C3C' if factor['correlation'] > 0.7 else 
+                                                                '#F39C12' if factor['correlation'] > 0.5 else 
+                                                                '#3498DB'
+                                            }
+                                        )
+                                    ]),
+                                    html.Span(f"{factor['correlation']*100:.0f}%", className='ms-2')
+                                ]),
+                                html.Td(factor['impact'], style={
+                                    'color': '#E74C3C' if factor['impact'] == 'Crítico' else
+                                            '#F39C12' if factor['impact'] == 'Alto' else
+                                            '#3498DB' if factor['impact'] == 'Medio' else
+                                            '#2ECC71'
+                                }),
+                                html.Td(
+                                    "Intervención inmediata" if factor['impact'] == 'Crítico' else
+                                    "Monitoreo constante" if factor['impact'] == 'Alto' else
+                                    "Revisión programada" if factor['impact'] == 'Medio' else
+                                    "Incluir en mantenimiento rutinario"
+                                )
+                            ]) for factor in factors
+                        ])
+                    ])
+                ])
+            ])
+        ])
+        
+        
+    def create_maintenance_planner(self):
+        """Crear planificador de mantenimiento basado en predicciones"""
+        # Datos de ejemplo para el planificador
+        maintenance_data = [
+            {'equipment': 'Kag 11/21', 'date': '2025-05-10', 'type': 'Preventivo', 'urgency': 'Media'},
+            {'equipment': 'Kag 40', 'date': '2025-04-30', 'type': 'Correctivo', 'urgency': 'Alta'},
+            {'equipment': 'Kag 13/23', 'date': '2025-05-05', 'type': 'Predictivo', 'urgency': 'Crítica'}
+        ]
+        
+        return html.Div(className='card mb-4', children=[
+            html.Div(className='card-header bg-success text-white', children=[
+                html.H5("Calendario de Mantenimiento Predictivo", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                # Calendario visual (simplificado)
+                html.Div(className='table-responsive', children=[
+                    html.Table(className='table table-bordered', children=[
+                        html.Thead(html.Tr([
+                            html.Th("Equipo"),
+                            html.Th("Fecha programada"),
+                            html.Th("Tipo"),
+                            html.Th("Urgencia"),
+                            html.Th("Acciones")
+                        ])),
+                        html.Tbody([
+                            html.Tr([
+                                html.Td(item['equipment']),
+                                html.Td(item['date']),
+                                html.Td(item['type']),
+                                html.Td(item['urgency'], style={
+                                    'backgroundColor': '#FADBD8' if item['urgency'] == 'Crítica' else
+                                                    '#FCF3CF' if item['urgency'] == 'Alta' else
+                                                    '#D4E6F1' if item['urgency'] == 'Media' else
+                                                    '#D5F5E3'
+                                }),
+                                html.Td([
+                                    html.Button('Reprogramar', 
+                                            id={'type': 'btn-reschedule', 'index': i},
+                                            className='btn btn-sm btn-outline-primary me-1'),
+                                    html.Button('Detalles', 
+                                            id={'type': 'btn-maintenance-details', 'index': i},
+                                            className='btn btn-sm btn-outline-secondary')
+                                ])
+                            ]) for i, item in enumerate(maintenance_data)
+                        ])
+                    ])
+                ]),
+                html.Div(className='text-end mt-2', children=[
+                    html.Button('Exportar calendario', 
+                            id='btn-export-calendar',
+                            className='btn btn-outline-success')
+                ])
+            ])
+        ])
+        
+        
+    def create_reliability_indicators(self, equipment_id):
+        """Crear indicadores de confiabilidad y vida útil restante"""
+        # Datos de ejemplo para el equipo seleccionado
+        reliability_data = {
+            'MTBF': 32.5,  # Tiempo medio entre fallos (días)
+            'MTTR': 4.2,   # Tiempo medio para reparar (horas)
+            'availability': 96.8,  # Disponibilidad (%)
+            'RUL': 62,     # Vida útil restante estimada (días)
+            'confidence': 87,  # Confianza de la estimación (%)
+            'maintenance_history': [
+                {'date': '2025-01-15', 'type': 'Preventivo', 'duration': 3.5},
+                {'date': '2025-02-20', 'type': 'Correctivo', 'duration': 8.0},
+                {'date': '2025-03-18', 'type': 'Preventivo', 'duration': 2.5}
+            ]
+        }
+        
+        return html.Div(className='card mb-4', children=[
+            html.Div(className='card-header bg-secondary text-white', children=[
+                html.H5(f"Indicadores de Confiabilidad - {equipment_id}", className='mb-0')
+            ]),
+            html.Div(className='card-body', children=[
+                html.Div(className='row', children=[
+                    # Indicadores clave
+                    html.Div(className='col-md-6', children=[
+                        html.Div(className='mb-4', children=[
+                            html.H6("Vida Útil Restante Estimada (RUL)", className='mb-3 text-center'),
+                            html.Div(className='d-flex justify-content-center', children=[
+                                html.Div(style={
+                                    'width': '200px',
+                                    'height': '200px',
+                                    'borderRadius': '50%',
+                                    'border': '10px solid #3498DB',
+                                    'display': 'flex',
+                                    'alignItems': 'center',
+                                    'justifyContent': 'center',
+                                    'flexDirection': 'column'
+                                }, children=[
+                                    html.Span(f"{reliability_data['RUL']}", style={
+                                        'fontSize': '36px',
+                                        'fontWeight': 'bold',
+                                        'color': '#2C3E50'
+                                    }),
+                                    html.Span("días", style={'fontSize': '16px', 'color': '#7F8C8D'})
+                                ])
+                            ]),
+                            html.P(f"Confianza: {reliability_data['confidence']}%", 
+                                className='text-center mt-2')
+                        ])
+                    ]),
+                    
+                    # Métricas de confiabilidad
+                    html.Div(className='col-md-6', children=[
+                        html.Div(className='row', children=[
+                            html.Div(className='col-6 mb-3', children=[
+                                html.Div(className='card h-100 border-0 shadow-sm', children=[
+                                    html.Div(className='card-body text-center', children=[
+                                        html.H6("MTBF", className='card-title'),
+                                        html.H3(f"{reliability_data['MTBF']}", className='mb-0'),
+                                        html.Small("días", className='text-muted')
+                                    ])
+                                ])
+                            ]),
+                            html.Div(className='col-6 mb-3', children=[
+                                html.Div(className='card h-100 border-0 shadow-sm', children=[
+                                    html.Div(className='card-body text-center', children=[
+                                        html.H6("MTTR", className='card-title'),
+                                        html.H3(f"{reliability_data['MTTR']}", className='mb-0'),
+                                        html.Small("horas", className='text-muted')
+                                    ])
+                                ])
+                            ]),
+                            html.Div(className='col-12 mb-3', children=[
+                                html.Div(className='card h-100 border-0 shadow-sm', children=[
+                                    html.Div(className='card-body text-center', children=[
+                                        html.H6("Disponibilidad", className='card-title'),
+                                        html.Div(className='progress', children=[
+                                            html.Div(
+                                                className='progress-bar',
+                                                style={
+                                                    'width': f"{reliability_data['availability']}%",
+                                                    'backgroundColor': 
+                                                        '#2ECC71' if reliability_data['availability'] > 95 else
+                                                        '#F39C12' if reliability_data['availability'] > 85 else
+                                                        '#E74C3C'
+                                                }
+                                            )
+                                        ]),
+                                        html.H3(f"{reliability_data['availability']}%", className='mt-2 mb-0')
+                                    ])
+                                ])
+                            ])
+                        ])
+                    ])
+                ])
+            ])
+        ])
 
 ##################################################################################################################
     
@@ -1504,7 +2397,7 @@ class DashboardGenerator:
 
     
     def create_dashboard(self):
-        """Crear y configurar el dashboard web"""
+        """Crear y configurar el dashboard web con características mejoradas"""
         if not self.dataframes:
             logger.error("No hay datos cargados para generar el dashboard")
             return False
@@ -1568,7 +2461,72 @@ class DashboardGenerator:
                     # Fila de KPIs
                     html.Div(className='row mb-4 g-3', children=self.create_kpi_cards()),
                     
-                    # Fila para gráfico de línea de tiempo (nueva fila)
+                    # Selector de fechas mejorado
+                    html.Div(className='card mb-3', children=[
+                        html.Div(className='card-header bg-primary text-white', children=[
+                            html.H5("Periodo de Análisis", className='mb-0')
+                        ]),
+                        html.Div(className='card-body', children=[
+                            html.Div(className='row align-items-center', children=[
+                                # Columna para selector de rango
+                                html.Div(className='col-md-6', children=[
+                                    html.Label("Rango de Fechas:", className='form-label fw-bold'),
+                                    dcc.DatePickerRange(
+                                        id='date-range-improved',
+                                        min_date_allowed=self.get_min_date(),
+                                        max_date_allowed=self.get_max_date(),
+                                        start_date=self.get_min_date(),
+                                        end_date=self.get_max_date(),
+                                        display_format='DD/MM/YYYY',
+                                        className='w-100'
+                                    ),
+                                ]),
+                                # Columna para botones de acceso rápido
+                                html.Div(className='col-md-6', children=[
+                                    html.Label("Selección rápida:", className='form-label fw-bold d-block'),
+                                    html.Div(className='btn-group w-100', children=[
+                                        html.Button('Última semana', id='btn-last-week', n_clicks=0, 
+                                                className='btn btn-outline-secondary'),
+                                        html.Button('Último mes', id='btn-last-month', n_clicks=0, 
+                                                className='btn btn-outline-secondary'),
+                                        html.Button('Último trimestre', id='btn-last-quarter', n_clicks=0, 
+                                                className='btn btn-outline-secondary'),
+                                        html.Button('Todo', id='btn-all-time', n_clicks=0, 
+                                                className='btn btn-outline-secondary')
+                                    ])
+                                ])
+                            ]),
+                            # Fila para mostrar periodo seleccionado
+                            html.Div(className='mt-3', children=[
+                                html.Div(id='selected-period-info', className='alert alert-info py-2', children=[
+                                    "Periodo seleccionado: Todo el rango disponible"
+                                ])
+                            ])
+                        ])
+                    ]),
+                    
+                    # Tabs para diferentes análisis
+                    html.Div(className='mt-4 mb-4', children=[
+                        dcc.Tabs(id='analysis-tabs', value='tab-general', className='mb-3', children=[
+                            dcc.Tab(label='Visión General', value='tab-general', className='font-weight-bold',
+                                style={'padding': '10px', 'fontWeight': 'bold'},
+                                selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                            dcc.Tab(label='Análisis Predictivo', value='tab-predictive', className='font-weight-bold',
+                                style={'padding': '10px', 'fontWeight': 'bold'},
+                                selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                            dcc.Tab(label='Análisis de Fallos', value='tab-failures', className='font-weight-bold',
+                                style={'padding': '10px', 'fontWeight': 'bold'},
+                                selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'}),
+                            dcc.Tab(label='Mantenimiento', value='tab-maintenance', className='font-weight-bold',
+                                style={'padding': '10px', 'fontWeight': 'bold'},
+                                selected_style={'backgroundColor': '#E8F0FE', 'borderTop': '3px solid #3498DB', 'padding': '10px'})
+                        ]),
+                        
+                        # Contenido de los tabs
+                        html.Div(id='tabs-content', className='p-3 border rounded bg-white')
+                    ]),
+                    
+                    # Fila para gráfico de línea de tiempo (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1582,7 +2540,65 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila para gráfico de proyección de tendencia
+                    # Selector de ADV específico
+                    html.Div(className='card mb-4', children=[
+                        html.Div(className='card-header bg-secondary text-white', children=[
+                            html.H5("Selección y Comparación de Aparatos de Vía", className='mb-0')
+                        ]),
+                        html.Div(className='card-body', children=[
+                            html.Div(className='row', children=[
+                                # Selector de ADV principal
+                                html.Div(className='col-md-5', children=[
+                                    html.Label("Seleccionar aparato de vía para análisis:", className='form-label fw-bold'),
+                                    dcc.Dropdown(
+                                        id='adv-selector',
+                                        options=[{'label': adv, 'value': adv} for adv in self.get_equipment_list()],
+                                        value=self.get_equipment_list()[0] if self.get_equipment_list() else None,
+                                        placeholder="Seleccione un aparato de vía",
+                                        className='mb-3'
+                                    ),
+                                    # Mostrar detalles del ADV seleccionado
+                                    html.Div(id='adv-details', className='alert alert-light')
+                                ]),
+                                
+                                # Comparación con otros ADVs
+                                html.Div(className='col-md-7', children=[
+                                    html.Label("Comparar con otros aparatos de vía:", className='form-label fw-bold'),
+                                    dcc.Dropdown(
+                                        id='adv-comparison',
+                                        options=[{'label': adv, 'value': adv} for adv in self.get_equipment_list()],
+                                        value=[],
+                                        multi=True,
+                                        placeholder="Seleccione ADVs para comparar",
+                                        className='mb-3'
+                                    ),
+                                    # Métricas para comparación
+                                    html.Div(className='d-flex justify-content-start', children=[
+                                        html.Div(className='form-check form-check-inline', children=[
+                                            dcc.Checklist(
+                                                id='compare-metrics',
+                                                options=[
+                                                    {'label': ' Tiempos de movimiento', 'value': 'mov_time'},
+                                                    {'label': ' Frecuencia de discordancias', 'value': 'disc_freq'},
+                                                    {'label': ' Tendencia de degradación', 'value': 'degrad_trend'}
+                                                ],
+                                                value=['mov_time'],
+                                                labelStyle={'display': 'block', 'marginBottom': '5px'}
+                                            )
+                                        ])
+                                    ])
+                                ])
+                            ]),
+                            
+                            # Botón de acción
+                            html.Div(className='text-center mt-3', children=[
+                                html.Button('Analizar', id='btn-analyze-adv', className='btn btn-primary px-4',
+                                        style={'fontWeight': 'bold'})
+                            ])
+                        ])
+                    ]),
+                    
+                    # Fila para gráfico de proyección de tendencia (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1596,7 +2612,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila para matriz de riesgo de degradación
+                    # Fila para matriz de riesgo de degradación (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1610,7 +2626,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila para análisis de patrones de degradación
+                    # Fila para análisis de patrones de degradación (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1624,7 +2640,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de gráficos principales
+                    # Fila de gráficos principales (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-6', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1648,7 +2664,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de filtros y controles
+                    # Fila de filtros y controles (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1708,7 +2724,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de gráficos adicionales
+                    # Fila de gráficos adicionales (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-6', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1732,7 +2748,21 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de alertas urgentes
+                    # Panel de indicadores tipo semáforo para estado crítico
+                    html.Div(className='row mb-4', children=[
+                        html.Div(className='col-md-12', children=[
+                            html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
+                                html.Div(className='card-header bg-info text-white', children=[
+                                    html.H5("Estado de los Equipos", className='card-title')
+                                ]),
+                                html.Div(className='card-body', children=[
+                                    html.Div(id='status-indicators', className='row')
+                                ])
+                            ])
+                        ])
+                    ]),
+                    
+                    # Fila de alertas urgentes (mantenida del original)
                     html.Div(id='alertas-container', className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1750,7 +2780,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de recomendaciones y análisis
+                    # Fila de recomendaciones y análisis (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-6', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1780,7 +2810,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila de patrones detectados
+                    # Fila de patrones detectados (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1797,7 +2827,7 @@ class DashboardGenerator:
                         ])
                     ]),
                     
-                    # Fila para tabla de datos
+                    # Fila para tabla de datos (mantenida del original)
                     html.Div(className='row mb-4', children=[
                         html.Div(className='col-md-12', children=[
                             html.Div(className='card', style={'backgroundColor': self.colors['card_background']}, children=[
@@ -1813,8 +2843,9 @@ class DashboardGenerator:
                 ])
             ])
             
-            # Configurar callbacks
+            # Configurar callbacks - ampliar con los nuevos necesarios
             self.setup_callbacks()
+            self.setup_improved_callbacks()
             
             logger.info(f"Dashboard creado exitosamente para {self.line} - {self.analysis_type}")
             return True
